@@ -18,3 +18,7 @@ main = do
 ## Status
 
 This project is in its infancy. It is a hobby project for its author. Maybe one day we can write non-trivial programs in it, but that day is not today.
+
+## License
+
+Copyright (c) 2023 Kevin Harrison, released under the MIT License (see LICENSE for details).
