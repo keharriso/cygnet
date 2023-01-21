@@ -1,0 +1,80 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.35.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           cygnet
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/keharriso/cygnet#readme>
+homepage:       https://github.com/keharriso/cygnet#readme
+bug-reports:    https://github.com/keharriso/cygnet/issues
+author:         Kevin Harrison
+maintainer:     keharriso@gmail.com
+copyright:      2023 Kevin Harrison
+license:        MIT
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    CHANGELOG.md
+
+source-repository head
+  type: git
+  location: https://github.com/keharriso/cygnet
+
+library
+  exposed-modules:
+      Cygnet.AST
+      Cygnet.Compiler
+      Cygnet.Parser
+  other-modules:
+      Paths_cygnet
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      base >=4.7 && <5
+    , containers ==0.6.*
+    , indents ==0.5.*
+    , ocelot
+    , parsec ==3.1.*
+    , text ==1.2.*
+    , transformers ==0.5.*
+  default-language: Haskell2010
+
+executable cygnet-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_cygnet
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , containers ==0.6.*
+    , cygnet
+    , indents ==0.5.*
+    , ocelot
+    , parsec ==3.1.*
+    , text ==1.2.*
+    , transformers ==0.5.*
+  default-language: Haskell2010
+
+test-suite cygnet-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_cygnet
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , containers ==0.6.*
+    , cygnet
+    , indents ==0.5.*
+    , parsec ==3.1.*
+    , text ==1.2.*
+    , transformers ==0.5.*
+  default-language: Haskell2010
