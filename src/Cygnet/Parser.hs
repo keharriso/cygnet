@@ -130,11 +130,10 @@ parseBody name =
                 return $ SLet var args statement
             )
 
-    parseExpression = (parseLiteral <|> parseApply) <* next
-    -- parseExpression prefix = parseExpression0 prefix <* next
-    -- parseExpression0 prefix = chainl1 (token (parseExpression1 prefix) <* next) ((\f x y -> EApply [f, x, y]) <$> (prefix >> ENamed <$> token parseOperator0 <* next))
-    -- parseExpression1 prefix = chainl1 (token (parseExpression2 prefix) <* next) ((\f x y -> EApply [f, x, y]) <$> (prefix >> ENamed <$> token parseOperator1 <* next))
-    -- parseExpression2 prefix = prefix >> (parseLiteral <|> parseApply prefix) <* next
+    parseExpression = parseExpression0
+    parseExpression0 = chainl1 parseExpression1 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator0 <* next))
+    parseExpression1 = chainl1 parseExpression2 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator1 <* next))
+    parseExpression2 = (parseLiteral <|> parseApply) <* next
 
     parseOperator = ENamed <$> token (many operatorChar)
 
