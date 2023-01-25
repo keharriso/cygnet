@@ -3,8 +3,10 @@
 module Cygnet.Parser (parseCygnet) where
 
 import Control.Monad (void)
+
 import Data.Map qualified as Map
-import Text.Parsec
+
+import Text.Parsec hiding (token)
 import Text.Parsec.Indent
 
 import Cygnet.AST
@@ -37,7 +39,7 @@ header = do
     void $ updateUserState (\state -> state{moduleIncludes = includes})
 
 include :: CygnetParser String
-include = topLevel >> withPos (string "include" *> spaces *> same *> stringLiteral <* manyTill space endl)
+include = topLevel >> withPos (string "include" *> spaces *> same *> token stringLiteral <* next)
 
 definitions :: CygnetParser ()
 definitions = do
@@ -72,7 +74,19 @@ parseLinkage :: CygnetParser Linkage
 parseLinkage = (try (string "foreign" >> space) >> return C) <|> return Cygnet
 
 parseSymbolName :: CygnetParser String
-parseSymbolName = many1 $ alphaNum <|> oneOf "_-"
+parseSymbolName = (:) <$> symbolStart <*> many symbolChar
+  where
+    symbolStart = alphaNum <|> char '_'
+    symbolChar = symbolStart <|> oneOf "-'?!"
+
+operatorChar :: CygnetParser Char
+operatorChar = oneOf "+-<>=!&|:$"
+
+parseOperator0 :: CygnetParser String
+parseOperator0 = (:) <$> oneOf "+-" <*> many operatorChar
+
+parseOperator1 :: CygnetParser String
+parseOperator1 = (:) <$> oneOf "*/%" <*> many operatorChar
 
 parseTypeName :: CygnetParser String
 parseTypeName = parseSymbolName
@@ -92,29 +106,46 @@ parseBody name =
     topLevel
         >> withPos
             ( do
-                string name >> sepAhead >> next
+                token (string name) >> next
                 params <- parseParams
-                body <- sameOrIndented >> char '=' >> sepAhead >> next >> sameOrIndented >> parseDefinition
+                body <- sameOrIndented >> token (char '=') >> next >> sameOrIndented >> parseDefinition
                 return (if null params then [""] else params, body)
             )
   where
-    parseParams = sepBy (sameOrIndented >> parseSymbolName <* sepAhead) next
-    parseDefinition = parseBlock "do" <|> ((: []) <$> parseStatement <* next)
-    parseStatement = parseReturn <|> (SExpression <$> parseExpression)
+    parseParams = endBy (sameOrIndented >> token parseSymbolName) next
+    parseDefinition = parseBlock "do" <|> ((: []) <$> parseStatement)
+    parseStatement = (parseReturn <|> parseLet <|> (SExpression <$> parseExpression)) <* next
     parseBlock kw =
-        let parseBlockBegin = try (string kw >> sepAhead) >> next >> parseBlockBody
-            parseBlockBody = sameOrIndented >> withPos (sepBy1 (checkIndent >> parseStatement) next)
+        let parseBlockBegin = try (token $ string kw) >> next >> parseBlockBody
+            parseBlockBody = sameOrIndented >> withPos (endBy1 (checkIndent >> parseStatement) next)
          in (same >> parseBlockBegin) <|> withPos parseBlockBegin
-    parseReturn = withPos (try (string "return" >> sepAhead) >> next >> sameOrIndented >> (SReturn <$> parseExpression))
-    parseExpression = parseLiteral <|> parseApply
+    parseReturn = withPos $ try (token $ string "return") >> next >> (SReturn <$> parseExpression)
+    parseLet =
+        withPos
+            ( do
+                var <- try (token $ string "let") >> next >> sameOrIndented >> token parseSymbolName <* next
+                args <- parseParams <* next
+                sameOrIndented >> token (char '=') >> next
+                statement <- sameOrIndented >> parseStatement
+                return $ SLet var args statement
+            )
+
+    parseExpression = (parseLiteral <|> parseApply) <* next
+    -- parseExpression prefix = parseExpression0 prefix <* next
+    -- parseExpression0 prefix = chainl1 (token (parseExpression1 prefix) <* next) ((\f x y -> EApply [f, x, y]) <$> (prefix >> ENamed <$> token parseOperator0 <* next))
+    -- parseExpression1 prefix = chainl1 (token (parseExpression2 prefix) <* next) ((\f x y -> EApply [f, x, y]) <$> (prefix >> ENamed <$> token parseOperator1 <* next))
+    -- parseExpression2 prefix = prefix >> (parseLiteral <|> parseApply prefix) <* next
+
+    parseOperator = ENamed <$> token (many operatorChar)
+
     parseLiteral = ((ELiteral . LString <$> stringLiteral) <|> numberLiteral) <* next
-    parseArg = parseLiteral <|> parseNamed <|> parseParenExpr
-    parseApply = withPos (EApply <$> sepBy1 (sameOrIndented >> parseArg) next)
-    parseNamed = ENamed <$> parseSymbolName <* sepAhead
-    parseParenExpr = char '(' >> next >> (EApply <$> sepBy1 parseArg next) <* next <* char ')'
+    parseApply = EApply <$> withPos (endBy1 parseArg next)
+    parseArg = sameOrIndented >> (parseLiteral <|> parseNamed <|> parseParenExpr)
+    parseNamed = ENamed <$> token parseSymbolName <* next
+    parseParenExpr = char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
 
 stringLiteral :: CygnetParser String
-stringLiteral = char '"' *> many quotedChar <* char '"'
+stringLiteral = token $ char '"' *> many quotedChar <* char '"'
 
 quotedChar :: CygnetParser Char
 quotedChar = noneOf "\\\"" <|> escapeSequence
@@ -124,7 +155,7 @@ quotedChar = noneOf "\\\"" <|> escapeSequence
 
 numberLiteral :: CygnetParser Expression
 numberLiteral = do
-    str <- many1 digit <* sepAhead
+    str <- token $ many1 digit
     return $ ELiteral $ LInteger $ read str
 
 endl :: CygnetParser ()
@@ -134,7 +165,7 @@ commentBegin :: CygnetParser ()
 commentBegin = void $ char '#'
 
 next :: CygnetParser ()
-next = void $ many (many1 space <|> (commentBegin >> manyTill anyChar endl))
+next = void $ many $ void space <|> void (commentBegin >> manyTill anyChar endl)
 
-sepAhead :: CygnetParser ()
-sepAhead = lookAhead (void space <|> commentBegin <|> eof)
+token :: CygnetParser a -> CygnetParser a
+token p = p <* lookAhead (void space <|> commentBegin <|> eof)

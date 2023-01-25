@@ -21,24 +21,24 @@ data Module = Module
     , moduleIncludes :: [String]
     , moduleSymbols :: Map String Symbol
     }
-    deriving (Show)
+    deriving (Eq, Show)
 
 data Symbol = Symbol Access Linkage String TopLevel
-    deriving (Show)
+    deriving (Eq, Show)
 
 data Access
     = Private
     | Public
-    deriving (Show)
+    deriving (Eq, Show)
 
 data Linkage
     = Cygnet
     | C
-    deriving (Show)
+    deriving (Eq, Show)
 
 data TopLevel
     = Function Block Type [ParameterName]
-    deriving (Show)
+    deriving (Eq, Show)
 
 type ParameterName = String
 
@@ -49,27 +49,30 @@ type Block = [Statement]
 
 data Statement
     = SReturn Expression
+    | SLet String [String] Statement
     | SExpression Expression
-    deriving (Show)
+    deriving (Eq, Show)
 
 data Expression
     = EApply [Expression]
     | ELiteral Literal
     | ENamed String
-    deriving (Show)
+    | ETyped Expression Type
+    deriving (Eq, Show)
 
 data Literal
     = LVoid
     | LString String
     | LInteger Integer
-    deriving (Show)
+    deriving (Eq, Show)
 
 data Type
     = TVoid
     | TString
     | TInt
     | TFunction Type Type
-    deriving (Show)
+    | TVar String
+    deriving (Eq, Show)
 
 getFuncRetType :: Type -> Type
 getFuncRetType t =
