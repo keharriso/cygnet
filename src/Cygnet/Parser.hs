@@ -4,6 +4,8 @@ module Cygnet.Parser (parseCygnet) where
 
 import Control.Monad (void)
 
+import Data.Char (chr)
+import Data.Functor (($>))
 import Data.Map qualified as Map
 
 import Text.Parsec hiding (token)
@@ -154,8 +156,21 @@ stringLiteral = token $ char '"' *> many quotedChar <* char '"'
 quotedChar :: CygnetParser Char
 quotedChar = noneOf "\\\"" <|> escapeSequence
   where
-    escapeSequence = char '\\' *> singleCharEscape
-    singleCharEscape = char '\\' <|> char '\"'
+    escapeSequence = char '\\' *> (singleCharEscape <|> hexChar)
+    singleCharEscape =
+        char 'a' $> '\a'
+            <|> char 'b' $> '\b'
+            <|> char 'f' $> '\f'
+            <|> char 'n' $> '\n'
+            <|> char 'r' $> '\r'
+            <|> char 't' $> '\t'
+            <|> char 'v' $> '\v'
+            <|> char '\\' $> '\\'
+            <|> char '\'' $> '\''
+            <|> char '"' $> '"'
+            <|> char '?' $> '?'
+            <|> char '0' $> '\0'
+    hexChar = (\hex -> chr $ read $ "0x" ++ hex) <$> (char 'x' >> count 2 hexDigit)
 
 numberLiteral :: CygnetParser Expression
 numberLiteral = do
