@@ -94,7 +94,7 @@ parseTypeName = parseSymbolName
 parseType :: CygnetParser Type
 parseType = do
     curriedTypes <- sepBy1 (sameOrIndented >> parseAtomicType <* next) (sameOrIndented >> string "->" >> next)
-    return $ foldr1 TFunction $ if length curriedTypes == 1 then TVoid : curriedTypes else curriedTypes
+    return $ foldr1 TFunction curriedTypes
   where
     parseAtomicType =
         try (string "void" >> return TVoid)
@@ -113,7 +113,12 @@ parseBody name =
             )
   where
     parseParams = endBy (sameOrIndented >> token parseSymbolName) next
-    parseDefinition = parseBlock "do" <|> ((: []) <$> parseStatement)
+    parseDefinition = mergeLets <$> parseBlock "do" <|> ((: []) <$> parseStatement)
+    mergeLets sts =
+        case sts of
+            (SLet as) : (SLet bs) : sts' -> mergeLets $ SLet (as ++ bs) : sts'
+            st : sts' -> st : mergeLets sts'
+            [] -> []
     parseStatement = (parseReturn <|> parseLet <|> (SExpression <$> parseExpression)) <* next
     parseBlock kw =
         let parseBlockBegin = try (token $ string kw) >> next >> parseBlockBody
@@ -127,7 +132,7 @@ parseBody name =
                 args <- parseParams <* next
                 sameOrIndented >> token (char '=') >> next
                 statement <- sameOrIndented >> parseStatement
-                return $ SLet var args statement
+                return $ SLet [Assignment var args statement]
             )
 
     parseExpression = parseExpression0

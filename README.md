@@ -9,7 +9,7 @@ An impure functional language inspired by Haskell and compiled to C.
 
 include "stdio.h"
 
-export foreign main : void -> int
+export foreign main : int
 main = do
     puts "Hello, world!"
     return 0

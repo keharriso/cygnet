@@ -6,12 +6,11 @@ module Cygnet.AST (
     TopLevel (..),
     Block,
     Statement (..),
+    Assignment (..),
     Expression (..),
     Literal (..),
     Type (..),
     symbolIsFunction,
-    getFuncRetType,
-    getFuncParams,
 ) where
 
 import Data.Map (Map)
@@ -49,8 +48,11 @@ type Block = [Statement]
 
 data Statement
     = SReturn Expression
-    | SLet String [String] Statement
+    | SLet [Assignment]
     | SExpression Expression
+    deriving (Eq, Show)
+
+data Assignment = Assignment String [String] Statement
     deriving (Eq, Show)
 
 data Expression
@@ -73,17 +75,3 @@ data Type
     | TFunction Type Type
     | TVar String
     deriving (Eq, Show)
-
-getFuncRetType :: Type -> Type
-getFuncRetType t =
-    case t of
-        TFunction _ retType -> getFuncRetType retType
-        _ -> t
-
-getFuncParams :: Type -> [String] -> [(Type, String)]
-getFuncParams ftype = zip (getParamTypes ftype)
-  where
-    getParamTypes ft =
-        case ft of
-            TFunction param ret -> param : getParamTypes ret
-            _ -> []
