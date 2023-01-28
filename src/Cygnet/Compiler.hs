@@ -284,7 +284,10 @@ convertCToCygnet :: CType -> Type
 convertCToCygnet ctype =
     case ctype of
         CT_Void -> TVoid
-        CT_Pointer t n -> undefined
+        CT_Pointer t n ->
+            case (t, n) of
+                (CT_Char, 1) -> TString
+                _ -> undefined
         CT_Array t n -> undefined
         CT_Char -> undefined
         CT_UChar -> undefined
