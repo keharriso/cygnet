@@ -501,7 +501,13 @@ getExpressionType expr =
                 resolved <- resolve name
                 case resolved of
                     ResolvedLocal _ t -> return t
-                    ResolvedCSymbol csym -> return $ convertCToCygnet (symbolType csym)
+                    ResolvedCSymbol csym ->
+                        case symbolType csym of
+                            CT_Function _ _ variadic ->
+                                if variadic
+                                    then error $ "The FFI can't handle variadic functions: \"" ++ symbolName csym ++ "\""
+                                    else return $ convertCToCygnet $ symbolType csym
+                            _ -> return $ convertCToCygnet $ symbolType csym
                     ResolvedCygnetSymbol (Symbol _ _ _ (Function _ t _)) -> return t
                     _ -> error $ "Failed to resolve name \"" ++ name ++ "\""
         ETyped _ t -> return t
