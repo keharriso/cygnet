@@ -110,10 +110,11 @@ parseType = do
     return $ foldr1 TFunction curriedTypes
   where
     parseAtomicType =
-        try (string "void" >> return TVoid)
-            <|> try (string "string" >> return TString)
-            <|> try (string "int" >> return TNumber)
-            <|> try (string "double" >> return TNumber)
+        try (TVoid <$ string "void")
+            <|> try (TBool <$ string "bool")
+            <|> try (TString <$ string "string")
+            <|> try (TNumber <$ string "int")
+            <|> try (TNumber <$ string "double")
 
 parseBody :: String -> CygnetParser ([String], Block)
 parseBody name =
@@ -133,20 +134,36 @@ parseBody name =
             (SLet as) : (SLet bs) : sts' -> mergeLets $ SLet (as ++ bs) : sts'
             st : sts' -> st : mergeLets sts'
             [] -> []
-    parseStatement = (parseReturn <|> parseLet <|> (SExpression <$> parseExpression)) <* next
+    parseStatement = (parseReturn <|> parseLet <|> parseIf <|> (SExpression <$> parseExpression)) <* next
     parseBlock kw =
-        let parseBlockBegin = try (token $ string kw) >> next >> parseBlockBody
+        let parseBlockBegin = parseKeyword kw >> next >> parseBlockBody
             parseBlockBody = sameOrIndented >> withPos (endBy1 (checkIndent >> parseStatement) next)
          in (same >> parseBlockBegin) <|> withPos parseBlockBegin
-    parseReturn = withPos $ try (token $ string "return") >> next >> (SReturn <$> parseExpression)
+    parseReturn = withPos $ parseKeyword "return" >> next >> (SReturn <$> parseExpression)
     parseLet =
         withPos
             ( do
-                var <- try (token $ string "let") >> next >> sameOrIndented >> token parseSymbolName <* next
+                var <- parseKeyword "let" >> next >> sameOrIndented >> token parseSymbolName <* next
                 args <- parseParams <* next
                 sameOrIndented >> token (char '=') >> next
                 statement <- sameOrIndented >> parseStatement
                 return $ SLet [Assignment var args statement]
+            )
+    parseIf =
+        withPos
+            ( do
+                parseKeyword "if"
+                next
+                sameOrIndented
+                condition <- parseExpression
+                next
+                sameOrIndented
+                trueBranch <- parseBlock "then"
+                next
+                sameOrIndented
+                falseBranch <- parseBlock "else" <|> return []
+                next
+                return $ SIf condition trueBranch falseBranch
             )
 
     parseExpression = parseExpression0
@@ -156,17 +173,25 @@ parseBody name =
 
     parseOperator = ENamed <$> token (many operatorChar)
 
-    parseLiteral = (voidLiteral <|> (ELiteral . LString <$> stringLiteral) <|> numberLiteral) <* next
+    parseLiteral = (voidLiteral <|> boolLiteral <|> (ELiteral . LString <$> stringLiteral) <|> numberLiteral) <* next
     parseApply = EApply <$> withPos (endBy1 parseArg next)
     parseArg = sameOrIndented >> (parseLiteral <|> parseNamed <|> parseParenExpr)
-    parseNamed = ENamed <$> token parseSymbolName <* next
+    parseNamed = notFollowedBy parseAnyKeyword >> (ENamed <$> token parseSymbolName <* next)
     parseParenExpr = char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
+    parseAnyKeyword =
+        let kws = ["module", "import", "include", "export", "foreign", "do", "if", "then", "else"]
+         in choice (map parseKeyword kws) <?> "keyword"
+    parseKeyword kw = void $ try (token $ string kw)
 
 voidLiteral :: CygnetParser Expression
-voidLiteral = ELiteral LVoid <$ token (try $ string "void")
+voidLiteral = ELiteral LVoid <$ token (try $ string "void") <?> "void"
+
+boolLiteral :: CygnetParser Expression
+boolLiteral = ELiteral . LBool <$>
+    ((True <$ token (try $ string "true")) <|> (False <$ token (try $ string "false"))) <?> "true or false"
 
 stringLiteral :: CygnetParser String
-stringLiteral = token $ char '"' *> many quotedChar <* char '"'
+stringLiteral = token (char '"' *> many quotedChar <* char '"') <?> "string"
 
 quotedChar :: CygnetParser Char
 quotedChar = noneOf "\\\"" <|> escapeSequence
@@ -188,7 +213,7 @@ quotedChar = noneOf "\\\"" <|> escapeSequence
     hexChar = (\hex -> chr $ read $ "0x" ++ hex) <$> (char 'x' >> count 2 hexDigit)
 
 numberLiteral :: CygnetParser Expression
-numberLiteral = hexLiteral <|> try integerLiteral <|> floatLiteral
+numberLiteral = hexLiteral <|> try integerLiteral <|> floatLiteral <?> "number"
   where
     sign = (string "+" $> "") <|> string "-"
     hexLiteral =

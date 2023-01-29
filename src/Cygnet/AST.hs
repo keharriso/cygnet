@@ -50,6 +50,7 @@ type Block = [Statement]
 data Statement
     = SReturn Expression
     | SLet [Assignment]
+    | SIf Expression Block Block
     | SExpression Expression
     deriving (Eq, Show)
 
@@ -65,6 +66,7 @@ data Expression
 
 data Literal
     = LVoid
+    | LBool Bool
     | LString String
     | LInteger Integer
     | LFloat Double
@@ -72,6 +74,7 @@ data Literal
 
 data Type
     = TVoid
+    | TBool
     | TString
     | TNumber
     | TFunction Type Type

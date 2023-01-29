@@ -3,6 +3,7 @@
 
 module Cygnet.Compiler (CompilerOptions (..), compile) where
 
+import Control.Monad (when, unless)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.State (StateT, get, gets, modify, runStateT)
 
@@ -244,6 +245,11 @@ statementDependencies st =
         SLet assignments -> do
             traverse_ (\(Assignment f _ _) -> putLocal f TVoid) assignments
             Set.unions <$> traverse assignmentDependencies assignments
+        SIf cond tBranch fBranch -> do
+            condDeps <- expressionDependencies cond
+            tBranchDeps <- blockDependencies tBranch
+            fBranchDeps <- blockDependencies fBranch
+            return $ Set.unions [condDeps, tBranchDeps, fBranchDeps]
   where
     assignmentDependencies (Assignment _ args st') =
         do
@@ -291,6 +297,11 @@ putLocal var varType = do
     case local of
         Nothing -> modify $ \st -> st{compilerLocals = Map.insert var varType localBlock : parentBlocks}
         _ -> error $ "Duplicate variable name: " ++ var
+
+setLocal :: String -> Type -> CompileMonad ()
+setLocal var varType = do
+    (localBlock : parentBlocks) <- gets compilerLocals
+    modify $ \st -> st{compilerLocals = Map.insert var varType localBlock : parentBlocks}
 
 getLocal :: String -> CompileMonad Value
 getLocal var = do
@@ -434,7 +445,7 @@ convertCToCygnet ctype =
         CT_Float -> undefined
         CT_Double -> TNumber
         CT_LDouble -> undefined
-        CT_Bool -> undefined
+        CT_Bool -> TBool
         CT_Function r ps v ->
             if v
                 then undefined
@@ -481,6 +492,7 @@ compileTypeName :: Type -> String
 compileTypeName t =
     case t of
         TVoid -> "void"
+        TBool -> "int"
         TString -> "char*"
         TNumber -> "double"
         TFunction _ _ -> "<fn type>"
@@ -501,9 +513,9 @@ compileFuncDef :: Symbol -> CompileMonad ()
 compileFuncDef symbol@(Symbol _ _ _ (Function fbody ftype params)) = do
         beginFuncDef
         let retType = fromJust $ getPartialType (length params) ftype
-        lastValue <- getLastValue <$> traverse compileStatement fbody
-        if retType /= TVoid && lastValue /= NoValue
-            then emitIndented ("return " ++ compileValue lastValue ++ ";\n") >> endFuncDef
+        value <- compileBlock fbody
+        if retType /= TVoid && value /= NoValue
+            then emitIndented ("return " ++ compileValue value ++ ";\n") >> endFuncDef
             else endFuncDef
     where
         beginFuncDef = do
@@ -516,6 +528,10 @@ compileFuncDef symbol@(Symbol _ _ _ (Function fbody ftype params)) = do
             popIndent
             emit "}\n\n"
             popLocalBlock
+
+compileBlock :: Block -> CompileMonad Value
+compileBlock blk = getLastValue <$> traverse compileStatement blk
+    where
         getLastValue values =
             case values of
                 [] -> NoValue
@@ -526,6 +542,7 @@ compileStatement st =
     case st of
         SReturn expr -> compileReturn expr
         SLet assignments -> compileLet assignments
+        SIf cond t e -> compileIf cond t e
         SExpression expr -> compileExpression expr
 
 compileReturn :: Expression -> CompileMonad Value
@@ -564,12 +581,44 @@ compileLet assignments =
                         NoValue -> error $ "Assigning void to variable \"" ++ var ++ "\""
                         _ ->
                             do
+                                setLocal var assignmentType
                                 let varName = compileValue $ LocalValue var assignmentType
                                 let varDecl = compileType assignmentType ++ " " ++ varName
                                 emitIndented $ varDecl ++ " = " ++ compileValue valVar ++ ";\n"
         assignmentTypes <- getAssignmentTypes assignments
         traverse_ compileAssignment (zip assignments assignmentTypes)
         return NoValue
+
+compileIf :: Expression -> Block -> Block -> CompileMonad Value
+compileIf cond t e = do
+    resultType <- getStatementType $ SIf cond t e
+    resultVar <-
+        case resultType of
+            TVoid -> return NoValue
+            _ ->
+                do
+                    var <- genVar resultType
+                    emitIndented $ compileType resultType ++ " " ++ compileValue var ++ ";\n"
+                    return var
+    condVal <- compileExpression cond
+    emitIndented $ "if (" ++ compileValue condVal ++ ")\n"
+    emitIndented "{\n"
+    pushIndent
+    thenResult <- compileBlock t
+    when (resultType /= TVoid && resultVar /= NoValue)
+        (emitIndented $ compileValue resultVar ++ " = " ++ compileValue thenResult ++ ";\n")
+    unless (null e) $ do
+        popIndent
+        emitIndented "}\n"
+        emitIndented "else\n"
+        emitIndented "{\n"
+        pushIndent
+        elseResult <- compileBlock e
+        when (resultType /= TVoid && resultVar /= NoValue)
+            (emitIndented $ compileValue resultVar ++ " = " ++ compileValue elseResult ++ ";\n")
+    popIndent
+    emitIndented "}\n"
+    return resultVar
 
 compileExpression :: Expression -> CompileMonad Value
 compileExpression expr =
@@ -604,25 +653,27 @@ compileLiteral :: Literal -> CompileMonad Value
 compileLiteral literal =
     case literal of
         LVoid -> return NoValue
+        LBool b -> compileAtomicLiteral "int" TBool (show $ if b then 1 else 0 :: Int)
         LString s ->
             do
                 let s' = escapeString s
                 var <- genVar TString
                 emitIndented $ "const char* " ++ compileValue var ++ " = " ++ s' ++ ";\n"
                 return var
-        LInteger i -> compileAtomicLiteral "int" TNumber i
-        LFloat f -> compileAtomicLiteral "double" TNumber f
+        LInteger i -> compileAtomicLiteral "int" TNumber (show i)
+        LFloat f -> compileAtomicLiteral "double" TNumber (show f)
 
-compileAtomicLiteral :: Show a => String -> Type -> a -> CompileMonad Value
+compileAtomicLiteral :: String -> Type -> String -> CompileMonad Value
 compileAtomicLiteral ctype cygtype x = do
     var <- genVar cygtype
-    emitIndented $ "const " ++ ctype ++ " " ++ compileValue var ++ " = " ++ show x ++ ";\n"
+    emitIndented $ "const " ++ ctype ++ " " ++ compileValue var ++ " = " ++ x ++ ";\n"
     return var
 
 compileType :: Type -> String
 compileType t =
     case t of
         TVoid -> "void"
+        TBool -> "int"
         TString -> "const char*"
         TNumber -> "double"
         TFunction a b -> "<func type>"
@@ -642,11 +693,22 @@ parseCHeader header = do
              in modify $ \st -> st{compilerIncludes = compilerIncludes st ++ [symbolsMap]}
         _ -> error $ "Failed to parse \"" ++ header ++ "\""
 
+getBlockType :: Block -> CompileMonad Type
+getBlockType blk =
+    case blk of
+        [] -> return TVoid
+        sts -> getStatementType $ last sts
+
 getStatementType :: Statement -> CompileMonad Type
 getStatementType st =
     case st of
         SReturn _ -> return TVoid
         SLet _ -> return TVoid
+        SIf _ t e ->
+            do
+                tt <- getBlockType t
+                et <- getBlockType e
+                return $ unify tt et
         SExpression expr -> getExpressionType expr
 
 getExpressionType :: Expression -> CompileMonad Type
@@ -659,6 +721,7 @@ getExpressionType expr =
         ELiteral literal ->
             case literal of
                 LVoid -> return TVoid
+                LBool _ -> return TBool
                 LString _ -> return TString
                 LInteger _ -> return TNumber
                 LFloat _ -> return TNumber
@@ -679,6 +742,9 @@ getExpressionType expr =
                     CygnetSymbolValue sym -> return $ symbolGetType sym
                     _ -> error $ "Failed to resolve name \"" ++ name ++ "\""
         ETyped _ t -> return t
+
+unify :: Type -> Type -> Type
+unify a b = a
 
 unifies :: Type -> Type -> Bool
 unifies a b =

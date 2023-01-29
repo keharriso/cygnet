@@ -1,0 +1,6 @@
+# Conditionals
+
+branch : bool -> string
+branch condition = do
+    let str = if condition then "true" else "false"
+    return str
