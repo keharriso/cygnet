@@ -2,7 +2,7 @@
 
 include "stdio.h"
 
-export foreign main : int
+export foreign main : void -> int
 main = do
     puts "Hello, world!"
     return 0

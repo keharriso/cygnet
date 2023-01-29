@@ -58,16 +58,27 @@ parseTopLevel =
                 linkage <- parseLinkage
                 next
                 name <- parseSymbolName
-                same
-                next
-                sameOrIndented
-                void $ char ':'
-                next
-                fnType <- parseType
-                next
-                (fnParams, fnBody) <- parseBody name
-                return $ Symbol access linkage name (Function fnBody fnType fnParams)
+                if linkage == C && not (isValidCName name)
+                    then error $ "Invalid foreign function name: \"" ++ name ++ "\""
+                    else do
+                        same
+                        next
+                        sameOrIndented
+                        void $ char ':'
+                        next
+                        fnType <- parseType
+                        next
+                        (fnParams, fnBody) <- parseBody name
+                        return $ Symbol access linkage name (Function fnBody fnType fnParams)
             )
+
+isValidCName :: String -> Bool
+isValidCName name =
+    let validStartChars = "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        validCNameChars = validStartChars ++ "1234567890"
+     in case name of
+            [] -> False
+            c : cs -> (c `elem` validStartChars) && all (`elem` validCNameChars) cs
 
 parseAccess :: CygnetParser Access
 parseAccess = (try (string "export" >> space) >> return Public) <|> return Private
@@ -101,7 +112,8 @@ parseType = do
     parseAtomicType =
         try (string "void" >> return TVoid)
             <|> try (string "string" >> return TString)
-            <|> try (string "int" >> return TInt)
+            <|> try (string "int" >> return TNumber)
+            <|> try (string "double" >> return TNumber)
 
 parseBody :: String -> CygnetParser ([String], Block)
 parseBody name =
@@ -144,11 +156,14 @@ parseBody name =
 
     parseOperator = ENamed <$> token (many operatorChar)
 
-    parseLiteral = ((ELiteral . LString <$> stringLiteral) <|> numberLiteral) <* next
+    parseLiteral = (voidLiteral <|> (ELiteral . LString <$> stringLiteral) <|> numberLiteral) <* next
     parseApply = EApply <$> withPos (endBy1 parseArg next)
     parseArg = sameOrIndented >> (parseLiteral <|> parseNamed <|> parseParenExpr)
     parseNamed = ENamed <$> token parseSymbolName <* next
     parseParenExpr = char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
+
+voidLiteral :: CygnetParser Expression
+voidLiteral = ELiteral LVoid <$ token (try $ string "void")
 
 stringLiteral :: CygnetParser String
 stringLiteral = token $ char '"' *> many quotedChar <* char '"'
@@ -173,9 +188,29 @@ quotedChar = noneOf "\\\"" <|> escapeSequence
     hexChar = (\hex -> chr $ read $ "0x" ++ hex) <$> (char 'x' >> count 2 hexDigit)
 
 numberLiteral :: CygnetParser Expression
-numberLiteral = do
-    str <- token $ many1 digit
-    return $ ELiteral $ LInteger $ read str
+numberLiteral = hexLiteral <|> try integerLiteral <|> floatLiteral
+  where
+    sign = (string "+" $> "") <|> string "-"
+    hexLiteral =
+        do
+            sgn <- option "" $ try $ sign <* lookAhead digit
+            digits <- token $ try (string "0x") *> many1 hexDigit
+            return $ ELiteral . LInteger . read $ sgn ++ "0x" ++ digits
+    integerLiteral =
+        do
+            sgn <- option "" $ try $ sign <* lookAhead digit
+            digits <- token $ many1 digit
+            return $ ELiteral . LInteger . read $ sgn ++ digits
+    floatLiteral =
+        do
+            sgn <- option "" $ try $ sign <* lookAhead digit
+            left <- many1 digit
+            point <- option "" $ string "." <* lookAhead digit
+            right <- many digit
+            e <- option "" $ string "e" <* lookAhead (void digit <|> void sign)
+            esgn <- option "" $ sign <* lookAhead digit
+            eexp <- token $ many digit
+            return $ ELiteral . LFloat . read $ sgn ++ left ++ point ++ right ++ e ++ esgn ++ eexp
 
 endl :: CygnetParser ()
 endl = void endOfLine <|> lookAhead eof
@@ -187,4 +222,4 @@ next :: CygnetParser ()
 next = void $ many $ void space <|> void (commentBegin >> manyTill anyChar endl)
 
 token :: CygnetParser a -> CygnetParser a
-token p = p <* lookAhead (void space <|> commentBegin <|> eof)
+token p = p <* lookAhead (void space <|> void (oneOf "()") <|> commentBegin <|> eof)

@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE InstanceSigs #-}
 
 module Cygnet.Compiler (CompilerOptions (..), compile) where
 
@@ -24,14 +25,17 @@ data CompilerOptions = CompilerOptions {includeDirs :: [String]}
     deriving (Show)
 
 data CompileState = CompileState
-    { options :: CompilerOptions
-    , includes :: [Map String CSymbol]
-    , locals :: [Map String Type]
-    , depth :: Int
-    , nextVar :: Int
-    , nextTypeVar :: Int
-    , result :: CompileResult
+    { compilerOptions :: CompilerOptions
+    , compilerImports :: [Import]
+    , compilerIncludes :: [Map String CSymbol]
+    , compilerLocals :: [Map String Type]
+    , compilerDepth :: Int
+    , compilerNextVar :: Int
+    , compilerNextTypeVar :: Int
+    , compilerResult :: CompileResult
     }
+
+type Import = Module
 
 type CompileResult = Text
 
@@ -41,13 +45,14 @@ compile :: CompilerOptions -> Module -> IO CompileResult
 compile opts unit = do
     let initialState =
             CompileState
-                { options = opts
-                , includes = []
-                , locals = []
-                , depth = 0
-                , nextVar = 0
-                , nextTypeVar = 0
-                , result = Text.empty
+                { compilerOptions = opts
+                , compilerImports = [unit]
+                , compilerIncludes = []
+                , compilerLocals = []
+                , compilerDepth = 0
+                , compilerNextVar = 0
+                , compilerNextTypeVar = 0
+                , compilerResult = Text.empty
                 }
     ((), st) <-
         runStateT
@@ -57,50 +62,172 @@ compile opts unit = do
                 let fnSymbols = filter symbolIsFunction symbols
                 fnDependencies <- Set.toList . Set.unions <$> traverse symbolDependencies fnSymbols
                 fnResolvedDeps <- traverse resolve fnDependencies
-                traverse_ compileResolvedFunctionSymbol (zip fnDependencies fnResolvedDeps)
+                let isExternal dep =
+                        case dep of
+                            CygnetSymbolValue sym -> sym `notElem` moduleSymbols unit
+                            _ -> True
+                let externalDeps = filter isExternal fnResolvedDeps
+                traverse_ compileResolvedFunctionSymbol externalDeps
                 emit "\n"
                 traverse_ (emit . compileFuncDecl) fnSymbols
                 emit "\n"
                 traverse_ compileFuncDef fnSymbols
             )
             initialState
-    return $ result st
+    return $ compilerResult st
 
-data ResolvedSymbol
-    = ResolvedLocal String Type
-    | ResolvedCSymbol CSymbol
-    | ResolvedCygnetSymbol Symbol
-    | AmbiguousSymbol [ResolvedSymbol]
-    | UnresolvedSymbol
-    deriving (Show)
+data Value
+    = TemporaryValue Int Type
+    | LocalValue String Type
+    | PartialValue Value [Value]
+    | BuiltInValue BuiltIn
+    | CSymbolValue CSymbol
+    | CygnetSymbolValue Symbol
+    | AmbiguousValue String [Value]
+    | UnresolvedValue String
+    | NoValue
+    deriving (Eq, Show)
 
-resolve :: String -> CompileMonad ResolvedSymbol
+compileValue :: Value -> String
+compileValue value = compileValues [value]
+
+compileValues :: [Value] -> String
+compileValues values =
+    case values of
+        (BuiltInValue builtIn : args) -> "(" ++ builtInCompile builtIn args ++ ")"
+        [TemporaryValue varId _] -> "_cyg_temp_" ++ show varId
+        [LocalValue var _] -> "_cyg_local_" ++ mangle var
+        [PartialValue _ _] -> undefined
+        [CSymbolValue csym] -> symbolName csym
+        [CygnetSymbolValue (Symbol _ linkage name _)] ->
+            case linkage of
+                Cygnet -> "_cyg_tl_" ++ mangle name
+                C -> name
+        [AmbiguousValue name _] -> error $ "Ambiguous symbol: \"" ++ name ++ "\""
+        [UnresolvedValue name] -> error $ "Unresolved symbol: \"" ++ name ++ "\""
+        [NoValue] -> error "No value"
+        (f : args) ->
+            if getArity f == length args
+                then compileCompleteApply f args
+                else compilePartialApply f args
+        _ -> undefined
+  where
+    mangle = id
+    compileCompleteApply f args =
+        let compiledArgs = map compileValue args
+         in compileValue f ++ "(" ++ intercalate ", " compiledArgs ++ ")"
+    compilePartialApply f args = undefined
+
+getType :: Value -> Type
+getType v =
+    case v of
+        TemporaryValue _ t -> t
+        LocalValue _ t -> t
+        PartialValue f args ->
+            let types = map getType (f : args)
+             in fromJust $ getApplyType types
+        BuiltInValue (BuiltIn{builtInType = t}) -> t
+        CSymbolValue csym -> convertCToCygnet $ symbolType csym
+        CygnetSymbolValue sym -> symbolGetType sym
+        AmbiguousValue name _ -> error $ "Ambiguous symbol: \"" ++ name ++ "\""
+        UnresolvedValue name -> error $ "Unresolved symbol: \"" ++ name ++ "\""
+        NoValue -> error "No value"
+
+getArity :: Value -> Int
+getArity v =
+    case v of
+        TemporaryValue _ t -> typeArity t
+        LocalValue _ t -> typeArity t
+        PartialValue f args -> getArity f - length args
+        BuiltInValue builtIn -> builtInArity builtIn
+        CSymbolValue (CSymbol{symbolType = CT_Function _ params _}) -> length params
+        CygnetSymbolValue (Symbol _ _ _ (Function _ t _)) -> typeArity t
+        _ -> 0
+  where
+    typeArity t =
+        case t of
+            TFunction TVoid ret -> typeArity ret
+            TFunction _ ret -> 1 + typeArity ret
+            _ -> 0
+
+data BuiltIn = BuiltIn
+    { builtInName :: String
+    , builtInType :: Type
+    , builtInArity :: Int
+    , builtInCompile :: [Value] -> String
+    }
+
+instance Eq BuiltIn where
+    (==) :: BuiltIn -> BuiltIn -> Bool
+    (==) a b = builtInName a == builtInName b && builtInType a == builtInType b
+
+instance Show BuiltIn where
+    show :: BuiltIn -> String
+    show (BuiltIn{builtInName = name, builtInType = t}) = "BuiltIn(" ++ name ++ " : " ++ show t ++ ")"
+
+builtIns :: Map String BuiltIn
+builtIns =
+    Map.fromList
+        [ binaryBuiltIn "+" TNumber TNumber TNumber $ \a b -> a ++ " + " ++ b
+        , binaryBuiltIn "-" TNumber TNumber TNumber $ \a b -> a ++ " - " ++ b
+        , binaryBuiltIn "*" TNumber TNumber TNumber $ \a b -> a ++ " * " ++ b
+        , binaryBuiltIn "/" TNumber TNumber TNumber $ \a b -> a ++ " / " ++ b
+        ]
+  where
+    binaryBuiltIn name a b c def =
+        let compileBinary values =
+                case map compileValue values of
+                    [x, y] -> def x y
+                    _ -> error $ "Binary operator applied to " ++ show (length values) ++ " arguments"
+         in (name, BuiltIn
+                    { builtInName = name
+                    , builtInType = TFunction a (TFunction b c)
+                    , builtInArity = 2
+                    , builtInCompile = compileBinary
+                    })
+
+resolve :: String -> CompileMonad Value
 resolve name = do
     local <- getLocal name
     case local of
-        ResolvedLocal _ _ -> return local
-        AmbiguousSymbol _ -> return local
+        LocalValue _ _ -> return local
+        AmbiguousValue _ _ -> return local
         _ -> do
-            st <- get
-            let cLookups = map (Map.lookup name) (includes st)
-            let cResolved = map ResolvedCSymbol $ sortOn symbolName . nub $ catMaybes cLookups
-            let resolved = cResolved
-            if null resolved
-                then return UnresolvedSymbol
-                else
-                    if not . null $ tail resolved
-                        then return $ AmbiguousSymbol resolved
-                        else case head resolved of
-                            ResolvedCSymbol csym ->
-                                case symbolType csym of
-                                    CT_Named resolvedName -> resolve resolvedName
+            let maybeBuiltIn = Map.lookup name builtIns
+            case maybeBuiltIn of
+                Just builtIn -> return $ BuiltInValue builtIn
+                _ -> do
+                    st <- get
+                    let cygLookups = map (Map.lookup name . moduleSymbols) (compilerImports st)
+                    let cygResolved = map CygnetSymbolValue $
+                            sortOn (\(Symbol _ _ name' _) -> name') . nub $ catMaybes cygLookups
+                    let cLookups = map (Map.lookup name) (compilerIncludes st)
+                    let cResolved = map CSymbolValue $
+                            sortOn symbolName . nub $ catMaybes cLookups
+                    let resolved = cygResolved ++ cResolved
+                    if null resolved
+                        then return $ UnresolvedValue name
+                        else
+                            if not . null $ tail resolved
+                                then return $ AmbiguousValue name resolved
+                                else case head resolved of
+                                    CSymbolValue csym ->
+                                        case symbolType csym of
+                                            CT_Named resolvedName -> resolve resolvedName
+                                            _ -> return $ head resolved
                                     _ -> return $ head resolved
-                            _ -> return $ head resolved
 
 symbolDependencies :: Symbol -> CompileMonad (Set String)
 symbolDependencies symbol =
     case symbol of
-        Symbol _ _ _ (Function body _ _) -> blockDependencies body
+        Symbol _ _ _ (Function body ft ps) ->
+            do
+                pushLocalBlock
+                let params = getFuncParams ft ps
+                traverse_ (\(t, p) -> putLocal p t) params
+                deps <- blockDependencies body
+                popLocalBlock
+                return deps
 
 blockDependencies :: Block -> CompileMonad (Set String)
 blockDependencies block = do
@@ -134,68 +261,73 @@ expressionDependencies expr =
         ENamed name -> do
             resolved <- getLocal name
             case resolved of
-                ResolvedLocal _ _ -> return Set.empty
+                LocalValue _ _ -> return Set.empty
                 _ -> return $ Set.singleton name
         ETyped expr' _ -> expressionDependencies expr'
 
 emit :: String -> CompileMonad ()
-emit text = modify $ \st -> st{result = Text.append (result st) (Text.pack text)}
+emit text = modify $ \st -> st{compilerResult = Text.append (compilerResult st) (Text.pack text)}
 
 emitIndented :: String -> CompileMonad ()
-emitIndented text = modify $ \st -> st{result = Text.append (result st) (Text.pack (concat (replicate (depth st) "    ") ++ text))}
+emitIndented text = modify $ \st -> st{compilerResult =
+    Text.append (compilerResult st) (Text.pack (concat (replicate (compilerDepth st) "    ") ++ text))}
 
 pushIndent :: CompileMonad ()
-pushIndent = modify $ \st -> st{depth = depth st + 1}
+pushIndent = modify $ \st -> st{compilerDepth = compilerDepth st + 1}
 
 popIndent :: CompileMonad ()
-popIndent = modify $ \st -> st{depth = depth st - 1}
+popIndent = modify $ \st -> st{compilerDepth = compilerDepth st - 1}
 
 pushLocalBlock :: CompileMonad ()
-pushLocalBlock = modify $ \st -> st{locals = Map.empty : locals st}
+pushLocalBlock = modify $ \st -> st{compilerLocals = Map.empty : compilerLocals st}
 
 popLocalBlock :: CompileMonad ()
-popLocalBlock = modify $ \st -> st{locals = tail (locals st)}
+popLocalBlock = modify $ \st -> st{compilerLocals = tail (compilerLocals st)}
 
 putLocal :: String -> Type -> CompileMonad ()
 putLocal var varType = do
-    (localBlock : parentBlocks) <- gets locals
+    (localBlock : parentBlocks) <- gets compilerLocals
     let local = Map.lookup var localBlock
     case local of
-        Nothing -> modify $ \st -> st{locals = Map.insert var varType localBlock : parentBlocks}
+        Nothing -> modify $ \st -> st{compilerLocals = Map.insert var varType localBlock : parentBlocks}
         _ -> error $ "Duplicate variable name: " ++ var
 
-getLocal :: String -> CompileMonad ResolvedSymbol
+getLocal :: String -> CompileMonad Value
 getLocal var = do
     st <- get
-    let localLookups = mapMaybe (Map.lookup var) (locals st)
-    let localResolved = map (ResolvedLocal var) (nub localLookups)
+    let localLookups = mapMaybe (Map.lookup var) (compilerLocals st)
+    let localResolved = map (LocalValue var) (nub localLookups)
     case localResolved of
         local : _ -> return local
-        [] -> return UnresolvedSymbol
+        [] -> return $ UnresolvedValue var
 
-genVar :: CompileMonad String
-genVar = do
-    varId <- gets nextVar
-    modify $ \st -> st{nextVar = varId + 1}
-    return $ "_cyg_var_" ++ show varId
+genVar :: Type -> CompileMonad Value
+genVar t = do
+    varId <- gets compilerNextVar
+    modify $ \st -> st{compilerNextVar = varId + 1}
+    return $ TemporaryValue varId t
 
 genTypeVar :: CompileMonad String
 genTypeVar = do
-    typeVarId <- gets nextTypeVar
-    modify $ \st -> st{nextTypeVar = typeVarId + 1}
+    typeVarId <- gets compilerNextTypeVar
+    modify $ \st -> st{compilerNextTypeVar = typeVarId + 1}
     return $ "a" ++ show typeVarId
 
 resetVars :: CompileMonad ()
-resetVars = modify $ \st -> st{nextVar = 0, nextTypeVar = 0}
+resetVars = modify $ \st -> st{compilerNextVar = 0, compilerNextTypeVar = 0}
 
-compileResolvedFunctionSymbol :: (String, ResolvedSymbol) -> CompileMonad ()
-compileResolvedFunctionSymbol (name, symbol) =
-    case symbol of
-        ResolvedLocal var _ -> error $ "Expected top-level function, got local symbol: " ++ var
-        ResolvedCSymbol csym -> compileCFuncDecl csym >>= emit
-        ResolvedCygnetSymbol cygsym -> emit $ compileFuncDecl cygsym
-        AmbiguousSymbol _ -> error $ "Ambiguous symbol: " ++ name
-        UnresolvedSymbol -> error $ "Unresolved symbol: " ++ name
+compileResolvedFunctionSymbol :: Value -> CompileMonad ()
+compileResolvedFunctionSymbol value =
+    case value of
+        TemporaryValue _ _ -> error "Expected top-level function, got temporary variable"
+        LocalValue var _ -> error $ "Expected top-level function, got local symbol: \"" ++ var ++ "\""
+        PartialValue _ _ -> error "Expected top-level function, got partial application"
+        BuiltInValue _ -> return ()
+        CSymbolValue csym -> compileCFuncDecl csym >>= emit
+        CygnetSymbolValue cygsym -> emit $ compileFuncDecl cygsym
+        AmbiguousValue name _ -> error $ "Ambiguous symbol: \"" ++ name ++ "\""
+        UnresolvedValue name -> error $ "Unresolved symbol: \"" ++ name ++ "\""
+        NoValue -> error "No value"
   where
     compileCFuncDecl csym = do
         proto <- compileCFuncProto csym
@@ -270,7 +402,7 @@ compileCType ctype =
         CT_Named name -> do
             resolved <- resolve name
             case resolved of
-                ResolvedCSymbol csym ->
+                CSymbolValue csym ->
                     if symbolElaborated csym
                         then case symbolType csym of
                             CT_Struct _ -> return $ "struct " ++ symbolName csym
@@ -293,17 +425,25 @@ convertCToCygnet ctype =
         CT_UChar -> undefined
         CT_Short -> undefined
         CT_UShort -> undefined
-        CT_Int -> TInt
+        CT_Int -> undefined
         CT_UInt -> undefined
         CT_Long -> undefined
         CT_ULong -> undefined
         CT_LLong -> undefined
         CT_ULLong -> undefined
         CT_Float -> undefined
-        CT_Double -> undefined
+        CT_Double -> TNumber
         CT_LDouble -> undefined
         CT_Bool -> undefined
-        CT_Function r ps v -> buildFuncType $ map convertCToCygnet $ ps ++ [r]
+        CT_Function r ps v ->
+            if v
+                then undefined
+                else
+                    buildFuncType $
+                        map convertCToCygnet $
+                            if null ps
+                                then [CT_Void, r]
+                                else ps ++ [r]
         CT_Struct fs -> undefined
         CT_Union fs -> undefined
         CT_Enum fs -> undefined
@@ -320,13 +460,14 @@ compileFuncProto symbol@(Symbol saccess slinkage sname (Function fbody ftype fpa
     case ftype of
         TFunction _ _ ->
             compileAccess saccess
-                ++ compileTypeName (getFuncRetType ftype)
+                ++ compileTypeName (fromJust $ getPartialType (length fparams) ftype)
                 ++ " "
                 ++ compileSymbolName symbol
                 ++ "("
-                ++ intercalate ", " (map compileFuncParam (getFuncParams ftype fparams))
+                ++ intercalate ", " (compileFuncParams ftype fparams)
                 ++ ")"
-        _ -> compileFuncProto $ Symbol saccess slinkage sname (Function fbody (TFunction TVoid ftype) ("" : fparams))
+        _ -> compileFuncProto $ Symbol saccess slinkage sname
+                (Function fbody (TFunction TVoid ftype) ("" : fparams))
 
 compileAccess :: Access -> String
 compileAccess access = case access of
@@ -334,133 +475,156 @@ compileAccess access = case access of
     Public -> ""
 
 compileSymbolName :: Symbol -> String
-compileSymbolName (Symbol _ _ sname _) = sname
+compileSymbolName sym = compileValue $ CygnetSymbolValue sym
 
 compileTypeName :: Type -> String
 compileTypeName t =
     case t of
         TVoid -> "void"
         TString -> "char*"
-        TInt -> "int"
+        TNumber -> "double"
         TFunction _ _ -> "<fn type>"
         TVar a -> "<type var " ++ a ++ ">"
 
 compileFuncParam :: (Type, String) -> String
 compileFuncParam (ptype, pname) =
-    compileTypeName ptype
-        ++ (if pname /= "" then " " ++ pname else "")
+    let pval = LocalValue pname ptype
+     in compileTypeName ptype ++ (if pname /= "" then " " ++ compileValue pval else "")
+
+compileFuncParams :: Type -> [String] -> [String]
+compileFuncParams ftype params = map compileFuncParam (getFuncParams ftype params)
 
 compileFuncDecl :: Symbol -> String
 compileFuncDecl symbol = compileFuncProto symbol ++ ";\n"
 
 compileFuncDef :: Symbol -> CompileMonad ()
-compileFuncDef symbol@(Symbol _ _ _ (Function fbody _ _)) = do
-    resetVars
-    pushLocalBlock
-    emit $ compileFuncProto symbol ++ "\n{\n"
-    pushIndent
-    traverse_ compileStatement fbody
-    popIndent
-    emit "}\n\n"
-    popLocalBlock
-  where
-    compileStatement st =
-        case st of
-            SReturn expr -> compileReturn expr
-            SLet assignments -> compileLet assignments
-            SExpression expr -> compileExpression expr
-    compileReturn expr =
-        case expr of
-            ELiteral LVoid -> emitIndented "return;\n" >> return ""
-            _ -> compileExpression expr >>= \var -> emitIndented ("return " ++ var ++ ";\n") >> return ""
-    compileLet assignments =
-        do
-            let quantifyTypeVars vars =
-                    do
-                        tvars <- traverse (const genTypeVar) vars
-                        traverse_ (\(var, tvar) -> putLocal var (TVar tvar)) (zip vars tvars)
-            let getAssignmentType (Assignment _ args st) =
-                    do
-                        pushLocalBlock
-                        quantifyTypeVars args
-                        t <- getStatementType st
-                        popLocalBlock
-                        return t
-            let getAssignmentTypes as =
-                    do
-                        let vars = Set.fromList $ map (\(Assignment var _ _) -> var) as
-                        quantifyTypeVars $ Set.toList vars
-                        traverse getAssignmentType as
-            let compileAssignment (Assignment var args st, assignmentType) =
-                    do
-                        pushLocalBlock
-                        quantifyTypeVars args
-                        valVar <- compileStatement st
-                        popLocalBlock
-                        case valVar of
-                            "" -> error $ "Assigning void to variable \"" ++ var ++ "\""
-                            _ ->
-                                do
-                                    let varName = getName $ ResolvedLocal var assignmentType
-                                    let varDecl = compileType assignmentType ++ " " ++ varName
-                                    emitIndented $ varDecl ++ " = " ++ valVar ++ ";\n"
-            assignmentTypes <- getAssignmentTypes assignments
-            traverse_ compileAssignment (zip assignments assignmentTypes)
-            return ""
-    compileExpression expr =
-        case expr of
-            EApply (f : args) ->
-                do
-                    fVar <- compileExpression f
-                    argVars <- traverse compileExpression args
-                    resType <- getExpressionType expr
-                    let fCall = fVar ++ "(" ++ intercalate ", " argVars ++ ");\n"
-                    case resType of
-                        TVoid -> emitIndented fCall >> return ""
-                        _ ->
-                            genVar >>= \resVar ->
-                                let resDecl = compileType resType ++ " " ++ resVar
-                                 in emitIndented (resDecl ++ " = " ++ fCall) >> return resVar
-            EApply [] -> return ""
-            ELiteral literal -> compileLiteral literal
-            ENamed name ->
-                do
-                    resolved <- resolve name
-                    case resolved of
-                        AmbiguousSymbol _ -> error $ "Ambiguous symbol: \"" ++ name ++ "\""
-                        UnresolvedSymbol -> error $ "Unresolved symbol: \"" ++ name ++ "\""
-                        _ -> return $ getName resolved
-            ETyped x _ -> compileExpression x
-    compileLiteral literal =
-        case literal of
-            LVoid -> return ""
-            LString s ->
-                do
-                    let s' = escapeString s
-                    var <- genVar
-                    emitIndented $ "const char* " ++ var ++ " = " ++ s' ++ ";\n"
-                    return var
-            LInteger i ->
-                do
-                    var <- genVar
-                    emitIndented $ "const int " ++ var ++ " = " ++ show i ++ ";\n"
-                    return var
+compileFuncDef symbol@(Symbol _ _ _ (Function fbody ftype params)) = do
+        beginFuncDef
+        let retType = fromJust $ getPartialType (length params) ftype
+        lastValue <- getLastValue <$> traverse compileStatement fbody
+        if retType /= TVoid && lastValue /= NoValue
+            then emitIndented ("return " ++ compileValue lastValue ++ ";\n") >> endFuncDef
+            else endFuncDef
+    where
+        beginFuncDef = do
+            resetVars
+            pushLocalBlock
+            emit $ compileFuncProto symbol ++ "\n{\n"
+            traverse_ (\(t, p) -> putLocal p t) (getFuncParams ftype params)
+            pushIndent
+        endFuncDef = do
+            popIndent
+            emit "}\n\n"
+            popLocalBlock
+        getLastValue values =
+            case values of
+                [] -> NoValue
+                _ -> last values
 
-getName :: ResolvedSymbol -> String
-getName resolved =
-    case resolved of
-        ResolvedLocal var _ -> "_cyg_local_" ++ var
-        ResolvedCSymbol csym -> symbolName csym
-        ResolvedCygnetSymbol (Symbol _ _ name _) -> name
-        AmbiguousSymbol _ -> error "Ambiguous symbol"
-        UnresolvedSymbol -> error "Unresolved symbol"
+compileStatement :: Statement -> CompileMonad Value
+compileStatement st =
+    case st of
+        SReturn expr -> compileReturn expr
+        SLet assignments -> compileLet assignments
+        SExpression expr -> compileExpression expr
+
+compileReturn :: Expression -> CompileMonad Value
+compileReturn expr =
+    case expr of
+        ELiteral LVoid -> emitIndented "return;\n" >> return NoValue
+        _ -> compileExpression expr >>= \var ->
+            emitIndented ("return " ++ compileValue var ++ ";\n") >> return NoValue
+
+compileLet :: [Assignment] -> CompileMonad Value
+compileLet assignments =
+    do
+        let quantifyTypeVars vars =
+                do
+                    tvars <- traverse (const genTypeVar) vars
+                    traverse_ (\(var, tvar) -> putLocal var (TVar tvar)) (zip vars tvars)
+        let getAssignmentType (Assignment _ args st) =
+                do
+                    pushLocalBlock
+                    quantifyTypeVars args
+                    t <- getStatementType st
+                    popLocalBlock
+                    return t
+        let getAssignmentTypes as =
+                do
+                    let vars = Set.fromList $ map (\(Assignment var _ _) -> var) as
+                    quantifyTypeVars $ Set.toList vars
+                    traverse getAssignmentType as
+        let compileAssignment (Assignment var args st, assignmentType) =
+                do
+                    pushLocalBlock
+                    quantifyTypeVars args
+                    valVar <- compileStatement st
+                    popLocalBlock
+                    case valVar of
+                        NoValue -> error $ "Assigning void to variable \"" ++ var ++ "\""
+                        _ ->
+                            do
+                                let varName = compileValue $ LocalValue var assignmentType
+                                let varDecl = compileType assignmentType ++ " " ++ varName
+                                emitIndented $ varDecl ++ " = " ++ compileValue valVar ++ ";\n"
+        assignmentTypes <- getAssignmentTypes assignments
+        traverse_ compileAssignment (zip assignments assignmentTypes)
+        return NoValue
+
+compileExpression :: Expression -> CompileMonad Value
+compileExpression expr =
+    case expr of
+        EApply exprs ->
+            case exprs of
+                [] -> return NoValue
+                _ -> compileApply exprs
+        ELiteral literal -> compileLiteral literal
+        ENamed name ->
+            do
+                resolved <- resolve name
+                case resolved of
+                    AmbiguousValue name' _ -> error $ "Ambiguous symbol: \"" ++ name' ++ "\""
+                    UnresolvedValue name' -> error $ "Unresolved symbol: \"" ++ name' ++ "\""
+                    _ -> return resolved
+        ETyped x _ -> compileExpression x
+
+compileApply :: [Expression] -> CompileMonad Value
+compileApply exprs = do
+    applyValues <- traverse compileExpression exprs
+    resultType <- getExpressionType $ EApply exprs
+    (left, result) <- case resultType of
+        TVoid -> return ("", NoValue)
+        _ -> genVar resultType >>= \var ->
+            return (compileType resultType ++ " " ++ compileValue var ++ " = ", var)
+    let right = compileValues applyValues
+    emitIndented $ left ++ right ++ ";\n"
+    return result
+
+compileLiteral :: Literal -> CompileMonad Value
+compileLiteral literal =
+    case literal of
+        LVoid -> return NoValue
+        LString s ->
+            do
+                let s' = escapeString s
+                var <- genVar TString
+                emitIndented $ "const char* " ++ compileValue var ++ " = " ++ s' ++ ";\n"
+                return var
+        LInteger i -> compileAtomicLiteral "int" TNumber i
+        LFloat f -> compileAtomicLiteral "double" TNumber f
+
+compileAtomicLiteral :: Show a => String -> Type -> a -> CompileMonad Value
+compileAtomicLiteral ctype cygtype x = do
+    var <- genVar cygtype
+    emitIndented $ "const " ++ ctype ++ " " ++ compileValue var ++ " = " ++ show x ++ ";\n"
+    return var
 
 compileType :: Type -> String
 compileType t =
     case t of
         TVoid -> "void"
         TString -> "const char*"
-        TInt -> "int"
+        TNumber -> "double"
         TFunction a b -> "<func type>"
         TVar var -> var
 
@@ -469,12 +633,13 @@ escapeString = show
 
 parseCHeader :: String -> CompileMonad ()
 parseCHeader header = do
-    CompileState{options = opts} <- get
+    CompileState{compilerOptions = opts} <- get
     parseResult <- liftIO $ parse (includeDirs opts) header
     case parseResult of
         Just symbols ->
-            let symbolsMap = Map.fromList $ [(name, symbol) | symbol@(CSymbol{symbolName = name}) <- symbols]
-             in modify $ \st -> st{includes = includes st ++ [symbolsMap]}
+            let symbolsMap = Map.fromList $ [(name, symbol) |
+                    symbol@(CSymbol{symbolName = name}) <- symbols]
+             in modify $ \st -> st{compilerIncludes = compilerIncludes st ++ [symbolsMap]}
         _ -> error $ "Failed to parse \"" ++ header ++ "\""
 
 getStatementType :: Statement -> CompileMonad Type
@@ -495,20 +660,23 @@ getExpressionType expr =
             case literal of
                 LVoid -> return TVoid
                 LString _ -> return TString
-                LInteger _ -> return TInt
+                LInteger _ -> return TNumber
+                LFloat _ -> return TNumber
         ENamed name ->
             do
                 resolved <- resolve name
                 case resolved of
-                    ResolvedLocal _ t -> return t
-                    ResolvedCSymbol csym ->
+                    LocalValue _ t -> return t
+                    BuiltInValue builtIn -> return $ builtInType builtIn
+                    CSymbolValue csym ->
                         case symbolType csym of
                             CT_Function _ _ variadic ->
                                 if variadic
-                                    then error $ "The FFI can't handle variadic functions: \"" ++ symbolName csym ++ "\""
+                                    then error $ "The FFI can't handle variadic functions: \"" ++
+                                                    symbolName csym ++ "\""
                                     else return $ convertCToCygnet $ symbolType csym
                             _ -> return $ convertCToCygnet $ symbolType csym
-                    ResolvedCygnetSymbol (Symbol _ _ _ (Function _ t _)) -> return t
+                    CygnetSymbolValue sym -> return $ symbolGetType sym
                     _ -> error $ "Failed to resolve name \"" ++ name ++ "\""
         ETyped _ t -> return t
 
@@ -519,6 +687,15 @@ unifies a b =
         (_, TVar _) -> True
         (TFunction a1 a2, TFunction b1 b2) -> unifies a1 b1 && unifies a2 b2
         _ -> a == b
+
+getPartialType :: Int -> Type -> Maybe Type
+getPartialType args f =
+    if args == 0
+        then Just f
+        else
+            case f of
+                TFunction _ r -> getPartialType (args - 1) r
+                _ -> Nothing
 
 getApplyType :: [Type] -> Maybe Type
 getApplyType t =
@@ -532,12 +709,6 @@ getApplyType t =
                         then getApplyType (b : xs)
                         else Nothing
                 _ -> Nothing
-
-getFuncRetType :: Type -> Type
-getFuncRetType t =
-    case t of
-        TFunction _ retType -> getFuncRetType retType
-        _ -> t
 
 getFuncParams :: Type -> [String] -> [(Type, String)]
 getFuncParams ftype = zip (getParamTypes ftype)

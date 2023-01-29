@@ -1,0 +1,7 @@
+# Arithmetic
+
+export foreign square : double -> double
+square x = x * x
+
+test : double -> double
+test x = 1 + square x * 2 - 1

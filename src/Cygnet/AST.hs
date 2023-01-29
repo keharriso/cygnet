@@ -11,6 +11,7 @@ module Cygnet.AST (
     Literal (..),
     Type (..),
     symbolIsFunction,
+    symbolGetType,
 ) where
 
 import Data.Map (Map)
@@ -66,12 +67,18 @@ data Literal
     = LVoid
     | LString String
     | LInteger Integer
+    | LFloat Double
     deriving (Eq, Show)
 
 data Type
     = TVoid
     | TString
-    | TInt
+    | TNumber
     | TFunction Type Type
     | TVar String
     deriving (Eq, Show)
+
+symbolGetType :: Symbol -> Type
+symbolGetType (Symbol _ _ _ tl) =
+    case tl of
+        Function _ t _ -> t

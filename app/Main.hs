@@ -10,13 +10,14 @@ import System.Environment (getArgs)
 import Cygnet.AST (Module (..))
 import Cygnet.Compiler (CompilerOptions (CompilerOptions, includeDirs), compile)
 import Cygnet.Parser (parseCygnet)
+import Data.Foldable (traverse_)
 import Data.Map qualified as Map
 
 main :: IO ()
 main = do
     args <- getArgs
 
-    let (includeArgs, fileArgs) = partition (isPrefixOf "-I") args
+    let (flags, fileArgs) = partition (isPrefixOf "-") args
 
     let file = case fileArgs of
             [path] -> path
@@ -24,7 +25,7 @@ main = do
 
     let opts =
             CompilerOptions
-                { includeDirs = map (drop 2) includeArgs
+                { includeDirs = map (drop 2) (filter (isPrefixOf "-I") flags)
                 }
 
     code <- readFile file
@@ -33,7 +34,7 @@ main = do
             Right parsed -> parsed
             Left err -> error $ show err
 
-    putStrLn "" >> print (head $ Map.elems $ moduleSymbols unit) >> putStrLn ""
-
-    compiled <- compile opts unit
-    Text.IO.putStr compiled
+    if "-P" `elem` flags
+        then let symbols = Map.elems $ moduleSymbols unit
+              in putStrLn "" >> traverse_ (\symbol -> print symbol >> putStrLn "") symbols
+        else compile opts unit >>= Text.IO.putStr
