@@ -90,34 +90,42 @@ data Value
     deriving (Eq, Show)
 
 compileValue :: Value -> String
-compileValue value = compileValues [value]
-
-compileValues :: [Value] -> String
-compileValues values =
-    case values of
-        (BuiltInValue builtIn : args) -> "(" ++ builtInCompile builtIn args ++ ")"
-        [TemporaryValue varId _] -> "_cyg_temp_" ++ show varId
-        [LocalValue var _] -> "_cyg_local_" ++ mangle var
-        [PartialValue _ _] -> undefined
-        [CSymbolValue csym] -> symbolName csym
-        [CygnetSymbolValue (Symbol _ linkage name _)] ->
+compileValue value =
+    case value of
+        TemporaryValue varId _ -> "_cyg_temp_" ++ show varId
+        LocalValue var _ -> "_cyg_local_" ++ mangle var
+        PartialValue _ _ -> undefined
+        BuiltInValue _ -> undefined
+        CSymbolValue csym -> symbolName csym
+        CygnetSymbolValue (Symbol _ linkage name _) ->
             case linkage of
                 Cygnet -> "_cyg_tl_" ++ mangle name
                 C -> name
-        [AmbiguousValue name _] -> error $ "Ambiguous symbol: \"" ++ name ++ "\""
-        [UnresolvedValue name] -> error $ "Unresolved symbol: \"" ++ name ++ "\""
-        [NoValue] -> error "No value"
-        (f : args) ->
-            if getArity f == length args
-                then compileCompleteApply f args
-                else compilePartialApply f args
-        _ -> undefined
+        AmbiguousValue name _ -> error $ "Ambiguous symbol: \"" ++ name ++ "\""
+        UnresolvedValue name -> error $ "Unresolved symbol: \"" ++ name ++ "\""
+        NoValue -> error "No value"
   where
     mangle = id
-    compileCompleteApply f args =
-        let compiledArgs = map compileValue args
-         in compileValue f ++ "(" ++ intercalate ", " compiledArgs ++ ")"
-    compilePartialApply f args = undefined
+
+
+compileApplyValue :: Value -> [Expression] -> CompileMonad String
+compileApplyValue value args =
+    case args of
+        [] -> case getType value of
+                TFunction TVoid _ -> return $ compileValue value ++ "()"
+                _ -> return $ compileValue value
+        _ -> if getArity value == length args
+                then compileCompleteApply value args
+                else compilePartialApply value args
+  where
+    compileCompleteApply f exprs =
+        case f of
+            BuiltInValue builtIn -> builtInCompile builtIn exprs
+            _ -> do
+                compiledExprs <- traverse compileExpression args
+                let compiledValues = map compileValue compiledExprs
+                return $ compileValue f ++ "(" ++ intercalate ", " compiledValues ++ ")"
+    compilePartialApply f exprs = undefined
 
 getType :: Value -> Type
 getType v =
@@ -155,7 +163,8 @@ data BuiltIn = BuiltIn
     { builtInName :: String
     , builtInType :: Type
     , builtInArity :: Int
-    , builtInCompile :: [Value] -> String
+    , builtInPartialApply :: Bool
+    , builtInCompile :: [Expression] -> CompileMonad String
     }
 
 instance Eq BuiltIn where
@@ -169,22 +178,81 @@ instance Show BuiltIn where
 builtIns :: Map String BuiltIn
 builtIns =
     Map.fromList
-        [ binaryBuiltIn "+" TNumber TNumber TNumber $ \a b -> a ++ " + " ++ b
-        , binaryBuiltIn "-" TNumber TNumber TNumber $ \a b -> a ++ " - " ++ b
-        , binaryBuiltIn "*" TNumber TNumber TNumber $ \a b -> a ++ " * " ++ b
-        , binaryBuiltIn "/" TNumber TNumber TNumber $ \a b -> a ++ " / " ++ b
+        [ binaryBuiltIn "*" TInt TInt TInt $ \a b -> "(" ++ a ++ " * " ++ b ++ ")"
+        , binaryBuiltIn "/" TInt TInt TInt $ \a b -> "(" ++ a ++ " / " ++ b ++ ")"
+        , binaryBuiltIn "%" TInt TInt TInt $ \a b -> "(" ++ a ++ " % " ++ b ++ ")"
+        , binaryBuiltIn "+" TInt TInt TInt $ \a b -> "(" ++ a ++ " + " ++ b ++ ")"
+        , binaryBuiltIn "-" TInt TInt TInt $ \a b -> "(" ++ a ++ " - " ++ b ++ ")"
+        , binaryBuiltIn "<" TInt TInt TBool $ \a b -> "(" ++ a ++ " < " ++ b ++ ")"
+        , binaryBuiltIn "<=" TInt TInt TBool $ \a b -> "(" ++ a ++ " <= " ++ b ++ ")"
+        , binaryBuiltIn ">" TInt TInt TBool $ \a b -> "(" ++ a ++ " > " ++ b ++ ")"
+        , binaryBuiltIn ">=" TInt TInt TBool $ \a b -> "(" ++ a ++ " >= " ++ b ++ ")"
+        , binaryBuiltIn "==" TInt TInt TBool $ \a b -> "(" ++ a ++ " == " ++ b ++ ")"
+        , binaryBuiltIn "!=" TInt TInt TBool $ \a b -> "(" ++ a ++ " != " ++ b ++ ")"
+        , lazyBinaryAnd "&&"
+        , lazyBinaryOr "||"
         ]
   where
     binaryBuiltIn name a b c def =
-        let compileBinary values =
-                case map compileValue values of
-                    [x, y] -> def x y
-                    _ -> error $ "Binary operator applied to " ++ show (length values) ++ " arguments"
+        let compileBinary exprs =
+                do
+                    args <- traverse compileExpression exprs
+                    let values = map compileValue args
+                    case values of
+                        [x, y] -> return $ def x y
+                        _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
          in (name, BuiltIn
                     { builtInName = name
                     , builtInType = TFunction a (TFunction b c)
                     , builtInArity = 2
+                    , builtInPartialApply = False
                     , builtInCompile = compileBinary
+                    })
+    lazyBinaryAnd name =
+        let compileAnd exprs =
+                case exprs of
+                    [a, b] -> do
+                        a' <- compileExpression a
+                        result <- genVar TBool
+                        emitIndented $ compileTypeName TBool ++ " " ++ compileValue result ++ " = 0;\n"
+                        emitIndented $ "if (" ++ compileValue a' ++ ")\n"
+                        emitIndented "{\n"
+                        pushIndent
+                        b' <- compileExpression b
+                        emitIndented $ compileValue result ++ " = " ++ compileValue b' ++ ";\n"
+                        popIndent
+                        emitIndented "}\n"
+                        return $ compileValue result
+                    _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
+         in (name, BuiltIn
+                    { builtInName = name
+                    , builtInType = TFunction TBool (TFunction TBool TBool)
+                    , builtInArity = 2
+                    , builtInPartialApply = True
+                    , builtInCompile = compileAnd
+                    })
+    lazyBinaryOr name =
+        let compileOr exprs =
+                case exprs of
+                    [a, b] -> do
+                        a' <- compileExpression a
+                        result <- genVar TBool
+                        emitIndented $ compileTypeName TBool ++ " " ++ compileValue result ++ " = 1;\n"
+                        emitIndented $ "if (!" ++ compileValue a' ++ ")\n"
+                        emitIndented "{\n"
+                        pushIndent
+                        b' <- compileExpression b
+                        emitIndented $ compileValue result ++ " = " ++ compileValue b' ++ ";\n"
+                        popIndent
+                        emitIndented "}\n"
+                        return $ compileValue result
+                    _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
+         in (name, BuiltIn
+                    { builtInName = name
+                    , builtInType = TFunction TBool (TFunction TBool TBool)
+                    , builtInArity = 2
+                    , builtInPartialApply = True
+                    , builtInCompile = compileOr
                     })
 
 resolve :: String -> CompileMonad Value
@@ -436,14 +504,14 @@ convertCToCygnet ctype =
         CT_UChar -> undefined
         CT_Short -> undefined
         CT_UShort -> undefined
-        CT_Int -> undefined
+        CT_Int -> TInt
         CT_UInt -> undefined
         CT_Long -> undefined
         CT_ULong -> undefined
         CT_LLong -> undefined
         CT_ULLong -> undefined
         CT_Float -> undefined
-        CT_Double -> TNumber
+        CT_Double -> TDouble
         CT_LDouble -> undefined
         CT_Bool -> TBool
         CT_Function r ps v ->
@@ -494,7 +562,9 @@ compileTypeName t =
         TVoid -> "void"
         TBool -> "int"
         TString -> "char*"
-        TNumber -> "double"
+        TInt -> "int"
+        TDouble -> "double"
+        TFunction TVoid a -> compileTypeName a
         TFunction _ _ -> "<fn type>"
         TVar a -> "<type var " ++ a ++ ">"
 
@@ -583,7 +653,7 @@ compileLet assignments =
                             do
                                 setLocal var assignmentType
                                 let varName = compileValue $ LocalValue var assignmentType
-                                let varDecl = compileType assignmentType ++ " " ++ varName
+                                let varDecl = compileTypeName assignmentType ++ " " ++ varName
                                 emitIndented $ varDecl ++ " = " ++ compileValue valVar ++ ";\n"
         assignmentTypes <- getAssignmentTypes assignments
         traverse_ compileAssignment (zip assignments assignmentTypes)
@@ -598,7 +668,7 @@ compileIf cond t e = do
             _ ->
                 do
                     var <- genVar resultType
-                    emitIndented $ compileType resultType ++ " " ++ compileValue var ++ ";\n"
+                    emitIndented $ compileTypeName resultType ++ " " ++ compileValue var ++ ";\n"
                     return var
     condVal <- compileExpression cond
     emitIndented $ "if (" ++ compileValue condVal ++ ")\n"
@@ -639,13 +709,13 @@ compileExpression expr =
 
 compileApply :: [Expression] -> CompileMonad Value
 compileApply exprs = do
-    applyValues <- traverse compileExpression exprs
     resultType <- getExpressionType $ EApply exprs
+    f <- compileExpression $ head exprs
     (left, result) <- case resultType of
         TVoid -> return ("", NoValue)
         _ -> genVar resultType >>= \var ->
-            return (compileType resultType ++ " " ++ compileValue var ++ " = ", var)
-    let right = compileValues applyValues
+            return (compileTypeName resultType ++ " " ++ compileValue var ++ " = ", var)
+    right <- compileApplyValue f $ tail exprs
     emitIndented $ left ++ right ++ ";\n"
     return result
 
@@ -660,24 +730,14 @@ compileLiteral literal =
                 var <- genVar TString
                 emitIndented $ "const char* " ++ compileValue var ++ " = " ++ s' ++ ";\n"
                 return var
-        LInteger i -> compileAtomicLiteral "int" TNumber (show i)
-        LFloat f -> compileAtomicLiteral "double" TNumber (show f)
+        LInteger i -> compileAtomicLiteral "int" TInt (show i)
+        LFloat f -> compileAtomicLiteral "double" TDouble (show f)
 
 compileAtomicLiteral :: String -> Type -> String -> CompileMonad Value
 compileAtomicLiteral ctype cygtype x = do
     var <- genVar cygtype
     emitIndented $ "const " ++ ctype ++ " " ++ compileValue var ++ " = " ++ x ++ ";\n"
     return var
-
-compileType :: Type -> String
-compileType t =
-    case t of
-        TVoid -> "void"
-        TBool -> "int"
-        TString -> "const char*"
-        TNumber -> "double"
-        TFunction a b -> "<func type>"
-        TVar var -> var
 
 escapeString :: String -> String
 escapeString = show
@@ -723,8 +783,8 @@ getExpressionType expr =
                 LVoid -> return TVoid
                 LBool _ -> return TBool
                 LString _ -> return TString
-                LInteger _ -> return TNumber
-                LFloat _ -> return TNumber
+                LInteger _ -> return TInt
+                LFloat _ -> return TDouble
         ENamed name ->
             do
                 resolved <- resolve name
@@ -751,6 +811,8 @@ unifies a b =
     case (a, b) of
         (TVar _, _) -> True
         (_, TVar _) -> True
+        (TFunction TVoid a', b') -> unifies a' b'
+        (a', TFunction TVoid b') -> unifies a' b'
         (TFunction a1 a2, TFunction b1 b2) -> unifies a1 b1 && unifies a2 b2
         _ -> a == b
 

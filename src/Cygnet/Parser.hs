@@ -96,10 +96,26 @@ operatorChar :: CygnetParser Char
 operatorChar = oneOf "+-<>=!&|:$"
 
 parseOperator0 :: CygnetParser String
-parseOperator0 = (:) <$> oneOf "+-" <*> many operatorChar
+parseOperator0 = token $ (:) <$> oneOf "|" <*> many operatorChar
 
 parseOperator1 :: CygnetParser String
-parseOperator1 = (:) <$> oneOf "*/%" <*> many operatorChar
+parseOperator1 = token $ (:) <$> oneOf "&" <*> many operatorChar
+
+parseOperator2 :: CygnetParser String
+parseOperator2 = try (token $ string "==")
+    <|> try (token $ string "!=")
+
+parseOperator3 :: CygnetParser String
+parseOperator3 = try (token $ string "<")
+    <|> try (token $ string ">")
+    <|> try (token $ string "<=")
+    <|> try (token $ string ">=")
+
+parseOperator4 :: CygnetParser String
+parseOperator4 = token $ (:) <$> oneOf "+-" <*> many operatorChar
+
+parseOperator5 :: CygnetParser String
+parseOperator5 = token $ (:) <$> oneOf "*/%" <*> many operatorChar
 
 parseTypeName :: CygnetParser String
 parseTypeName = parseSymbolName
@@ -113,8 +129,8 @@ parseType = do
         try (TVoid <$ string "void")
             <|> try (TBool <$ string "bool")
             <|> try (TString <$ string "string")
-            <|> try (TNumber <$ string "int")
-            <|> try (TNumber <$ string "double")
+            <|> try (TInt <$ string "int")
+            <|> try (TDouble <$ string "double")
 
 parseBody :: String -> CygnetParser ([String], Block)
 parseBody name =
@@ -169,7 +185,11 @@ parseBody name =
     parseExpression = parseExpression0
     parseExpression0 = chainl1 parseExpression1 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator0 <* next))
     parseExpression1 = chainl1 parseExpression2 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator1 <* next))
-    parseExpression2 = (parseLiteral <|> parseApply) <* next
+    parseExpression2 = chainl1 parseExpression3 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator2 <* next))
+    parseExpression3 = chainl1 parseExpression4 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator3 <* next))
+    parseExpression4 = chainl1 parseExpression5 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator4 <* next))
+    parseExpression5 = chainl1 parseExpression6 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator5 <* next))
+    parseExpression6 = (parseLiteral <|> parseApply) <* next
 
     parseOperator = ENamed <$> token (many operatorChar)
 

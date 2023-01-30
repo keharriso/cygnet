@@ -1,6 +1,24 @@
+include "stdio.h"
+
 # Conditionals
 
-branch : bool -> string
-branch condition = do
-    let str = if condition then "true" else "false"
-    return str
+not : bool -> bool
+not x = if x then false else true
+
+xor : bool -> bool -> bool
+xor a b = a && not b || not a && b
+
+# Test laziness
+
+putTrue : void -> bool
+putTrue = do
+    puts "true"
+    true
+
+putFalse : void -> bool
+putFalse = do
+    puts "false"
+    false
+
+testLazy : void -> void
+testLazy = putTrue || putFalse

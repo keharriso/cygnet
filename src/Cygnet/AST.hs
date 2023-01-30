@@ -76,7 +76,8 @@ data Type
     = TVoid
     | TBool
     | TString
-    | TNumber
+    | TInt
+    | TDouble
     | TFunction Type Type
     | TVar String
     deriving (Eq, Show)
