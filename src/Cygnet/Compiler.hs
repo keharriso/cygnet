@@ -112,11 +112,13 @@ compileApplyValue :: Value -> [Expression] -> CompileMonad String
 compileApplyValue value args =
     case args of
         [] -> case getType value of
-                TFunction TVoid _ -> return $ compileValue value ++ "()"
+                TFunction TVoid _ _ -> return $ compileValue value ++ "()"
                 _ -> return $ compileValue value
-        _ -> if getArity value == length args
-                then compileCompleteApply value args
-                else compilePartialApply value args
+        _ -> if length args < getArity value
+                then compilePartialApply value args
+                else if length args == getArity value || isVariadic value
+                    then compileCompleteApply value args
+                    else error "Function applied to too many arguments"
   where
     compileCompleteApply f exprs =
         case f of
@@ -134,7 +136,7 @@ getType v =
         LocalValue _ t -> t
         PartialValue f args ->
             let types = map getType (f : args)
-             in fromJust $ getApplyType types
+             in fromJust $ getApplyType types $ isVariadic f
         BuiltInValue (BuiltIn{builtInType = t}) -> t
         CSymbolValue csym -> convertCToCygnet $ symbolType csym
         CygnetSymbolValue sym -> symbolGetType sym
@@ -155,9 +157,16 @@ getArity v =
   where
     typeArity t =
         case t of
-            TFunction TVoid ret -> typeArity ret
-            TFunction _ ret -> 1 + typeArity ret
+            TFunction TVoid ret _ -> typeArity ret
+            TFunction _ ret _ -> 1 + typeArity ret
             _ -> 0
+
+isVariadic :: Value -> Bool
+isVariadic v =
+    case v of
+        PartialValue v' _ -> isVariadic v'
+        CSymbolValue (CSymbol{symbolType = CT_Function _ _ variadic}) -> variadic
+        _ -> False
 
 data BuiltIn = BuiltIn
     { builtInName :: String
@@ -203,7 +212,7 @@ builtIns =
                         _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
          in (name, BuiltIn
                     { builtInName = name
-                    , builtInType = TFunction a (TFunction b c)
+                    , builtInType = TFunction a (TFunction b c False) False
                     , builtInArity = 2
                     , builtInPartialApply = False
                     , builtInCompile = compileBinary
@@ -226,7 +235,7 @@ builtIns =
                     _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
          in (name, BuiltIn
                     { builtInName = name
-                    , builtInType = TFunction TBool (TFunction TBool TBool)
+                    , builtInType = TFunction TBool (TFunction TBool TBool False) False
                     , builtInArity = 2
                     , builtInPartialApply = True
                     , builtInCompile = compileAnd
@@ -249,7 +258,7 @@ builtIns =
                     _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
          in (name, BuiltIn
                     { builtInName = name
-                    , builtInType = TFunction TBool (TFunction TBool TBool)
+                    , builtInType = TFunction TBool (TFunction TBool TBool False) False
                     , builtInArity = 2
                     , builtInPartialApply = True
                     , builtInCompile = compileOr
@@ -515,14 +524,12 @@ convertCToCygnet ctype =
         CT_LDouble -> undefined
         CT_Bool -> TBool
         CT_Function r ps v ->
-            if v
-                then undefined
-                else
-                    buildFuncType $
-                        map convertCToCygnet $
-                            if null ps
-                                then [CT_Void, r]
-                                else ps ++ [r]
+            let funcType = buildFuncType
+                    $ map convertCToCygnet
+                    $ if null ps then [CT_Void, r] else ps ++ [r]
+             in case funcType of
+                    TFunction a b _ -> TFunction a b v
+                    _ -> funcType
         CT_Struct fs -> undefined
         CT_Union fs -> undefined
         CT_Enum fs -> undefined
@@ -532,12 +539,12 @@ convertCToCygnet ctype =
         case curriedTypes of
             [] -> TVoid
             [t] -> t
-            (t : ts) -> TFunction t (buildFuncType ts)
+            (t : ts) -> TFunction t (buildFuncType ts) False
 
 compileFuncProto :: Symbol -> String
 compileFuncProto symbol@(Symbol saccess slinkage sname (Function fbody ftype fparams)) =
     case ftype of
-        TFunction _ _ ->
+        TFunction _ _ _ ->
             compileAccess saccess
                 ++ compileTypeName (fromJust $ getPartialType (length fparams) ftype)
                 ++ " "
@@ -546,7 +553,7 @@ compileFuncProto symbol@(Symbol saccess slinkage sname (Function fbody ftype fpa
                 ++ intercalate ", " (compileFuncParams ftype fparams)
                 ++ ")"
         _ -> compileFuncProto $ Symbol saccess slinkage sname
-                (Function fbody (TFunction TVoid ftype) ("" : fparams))
+                (Function fbody (TFunction TVoid ftype False) ("" : fparams))
 
 compileAccess :: Access -> String
 compileAccess access = case access of
@@ -564,8 +571,8 @@ compileTypeName t =
         TString -> "char*"
         TInt -> "int"
         TDouble -> "double"
-        TFunction TVoid a -> compileTypeName a
-        TFunction _ _ -> "<fn type>"
+        TFunction TVoid a _ -> compileTypeName a
+        TFunction _ _ _ -> "<fn type>"
         TVar a -> "<type var " ++ a ++ ">"
 
 compileFuncParam :: (Type, String) -> String
@@ -777,7 +784,9 @@ getExpressionType expr =
         EApply application ->
             do
                 appTypes <- traverse getExpressionType application
-                return $ fromJust $ getApplyType appTypes
+                case appTypes of
+                    (TFunction _ _ v : _) -> return $ fromJust $ getApplyType appTypes v
+                    _ -> return $ fromJust $ getApplyType appTypes False
         ELiteral literal ->
             case literal of
                 LVoid -> return TVoid
@@ -791,14 +800,7 @@ getExpressionType expr =
                 case resolved of
                     LocalValue _ t -> return t
                     BuiltInValue builtIn -> return $ builtInType builtIn
-                    CSymbolValue csym ->
-                        case symbolType csym of
-                            CT_Function _ _ variadic ->
-                                if variadic
-                                    then error $ "The FFI can't handle variadic functions: \"" ++
-                                                    symbolName csym ++ "\""
-                                    else return $ convertCToCygnet $ symbolType csym
-                            _ -> return $ convertCToCygnet $ symbolType csym
+                    CSymbolValue csym -> return $ convertCToCygnet $ symbolType csym
                     CygnetSymbolValue sym -> return $ symbolGetType sym
                     _ -> error $ "Failed to resolve name \"" ++ name ++ "\""
         ETyped _ t -> return t
@@ -811,9 +813,9 @@ unifies a b =
     case (a, b) of
         (TVar _, _) -> True
         (_, TVar _) -> True
-        (TFunction TVoid a', b') -> unifies a' b'
-        (a', TFunction TVoid b') -> unifies a' b'
-        (TFunction a1 a2, TFunction b1 b2) -> unifies a1 b1 && unifies a2 b2
+        (TFunction TVoid a' _, b') -> unifies a' b'
+        (a', TFunction TVoid b' _) -> unifies a' b'
+        (TFunction a1 a2 _, TFunction b1 b2 _) -> unifies a1 b1 && unifies a2 b2
         _ -> a == b
 
 getPartialType :: Int -> Type -> Maybe Type
@@ -822,26 +824,28 @@ getPartialType args f =
         then Just f
         else
             case f of
-                TFunction _ r -> getPartialType (args - 1) r
+                TFunction _ r _ -> getPartialType (args - 1) r
                 _ -> Nothing
 
-getApplyType :: [Type] -> Maybe Type
-getApplyType t =
+getApplyType :: [Type] -> Variadic -> Maybe Type
+getApplyType t variadic =
     case t of
         [] -> Nothing
         [t'] -> Just t'
         (f : x : xs) ->
             case f of
-                TFunction a b ->
+                TFunction a b _ ->
                     if unifies x a
-                        then getApplyType (b : xs)
+                        then getApplyType (b : xs) variadic
                         else Nothing
-                _ -> Nothing
+                _ -> if variadic
+                        then getApplyType (x : xs) variadic
+                        else Nothing
 
 getFuncParams :: Type -> [String] -> [(Type, String)]
 getFuncParams ftype = zip (getParamTypes ftype)
   where
     getParamTypes ft =
         case ft of
-            TFunction param ret -> param : getParamTypes ret
+            TFunction param ret _ -> param : getParamTypes ret
             _ -> []

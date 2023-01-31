@@ -123,7 +123,7 @@ parseTypeName = parseSymbolName
 parseType :: CygnetParser Type
 parseType = do
     curriedTypes <- sepBy1 (sameOrIndented >> parseAtomicType <* next) (sameOrIndented >> string "->" >> next)
-    return $ foldr1 TFunction curriedTypes
+    return $ foldr1 (\a b -> TFunction a b False) curriedTypes
   where
     parseAtomicType =
         try (TVoid <$ string "void")

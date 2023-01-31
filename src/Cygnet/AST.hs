@@ -10,6 +10,7 @@ module Cygnet.AST (
     Expression (..),
     Literal (..),
     Type (..),
+    Variadic,
     symbolIsFunction,
     symbolGetType,
 ) where
@@ -78,9 +79,11 @@ data Type
     | TString
     | TInt
     | TDouble
-    | TFunction Type Type
+    | TFunction Type Type Variadic
     | TVar String
     deriving (Eq, Show)
+
+type Variadic = Bool
 
 symbolGetType :: Symbol -> Type
 symbolGetType (Symbol _ _ _ tl) =

@@ -1,0 +1,8 @@
+# Variadic functions
+
+include "stdio.h"
+
+export foreign main : void -> int
+main = do
+    printf "%d\n" 42
+    return 0
