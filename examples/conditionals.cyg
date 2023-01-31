@@ -22,3 +22,9 @@ putFalse = do
 
 testLazy : void -> void
 testLazy = putTrue || putFalse
+
+noElse : bool -> void
+noElse x = do
+    if x then
+        puts "YES"
+    puts "NO"

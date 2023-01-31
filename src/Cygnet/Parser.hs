@@ -176,8 +176,7 @@ parseBody name =
                 sameOrIndented
                 trueBranch <- parseBlock "then"
                 next
-                sameOrIndented
-                falseBranch <- parseBlock "else" <|> return []
+                falseBranch <- try (sameOrIndented >> parseBlock "else") <|> return []
                 next
                 return $ SIf condition trueBranch falseBranch
             )
