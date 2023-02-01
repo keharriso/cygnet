@@ -140,7 +140,7 @@ parseBody name =
                 token (string name) >> next
                 params <- parseParams
                 body <- sameOrIndented >> token (char '=') >> next >> sameOrIndented >> parseDefinition
-                return (if null params then [""] else params, body)
+                return (if null params then [] else params, body)
             )
   where
     parseParams = endBy (sameOrIndented >> token parseSymbolName) next
