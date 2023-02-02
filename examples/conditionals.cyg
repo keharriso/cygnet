@@ -2,6 +2,35 @@ include "stdio.h"
 
 # Conditionals
 
+withElse : bool -> void
+withElse x =
+    if x then
+        puts "YES"
+    else
+        puts "NO"
+
+withoutElse : bool -> void
+withoutElse x = do
+    if x then
+        puts "YES"
+    puts "ANY"
+
+nested : int -> void
+nested x =
+    if x == 1 then
+        puts "one"
+    elseif x >= 2 && x <= 4 then
+        if x == 2 then
+            puts "two"
+        elseif x == 3 then
+            puts "three"
+        else
+            puts "four"
+    elseif x >= 5 then
+        puts "many"
+    else
+        puts "none"
+
 not : bool -> bool
 not x = if x then false else true
 
@@ -22,9 +51,3 @@ putFalse = do
 
 testLazy : void -> void
 testLazy = putTrue || putFalse
-
-noElse : bool -> void
-noElse x = do
-    if x then
-        puts "YES"
-    puts "NO"
