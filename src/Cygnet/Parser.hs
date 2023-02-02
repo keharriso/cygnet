@@ -102,14 +102,16 @@ parseOperator1 :: CygnetParser String
 parseOperator1 = token $ (:) <$> oneOf "&" <*> many operatorChar
 
 parseOperator2 :: CygnetParser String
-parseOperator2 = try (token $ string "==")
-    <|> try (token $ string "!=")
+parseOperator2 =
+    try (token $ string "==")
+        <|> try (token $ string "!=")
 
 parseOperator3 :: CygnetParser String
-parseOperator3 = try (token $ string "<")
-    <|> try (token $ string ">")
-    <|> try (token $ string "<=")
-    <|> try (token $ string ">=")
+parseOperator3 =
+    try (token $ string "<")
+        <|> try (token $ string ">")
+        <|> try (token $ string "<=")
+        <|> try (token $ string ">=")
 
 parseOperator4 :: CygnetParser String
 parseOperator4 = token $ (:) <$> oneOf "+-" <*> many operatorChar
@@ -180,8 +182,11 @@ parseBody name =
                 next
                 return $ SIf condition trueBranch falseBranch
             )
-    parseElse = ((sameOrIndented <|> checkIndent) >>
-        (try ((: []) <$> parseIf "elseif") <|> try (parseBlock "else"))) <|> return []
+    parseElse =
+        ( (sameOrIndented <|> checkIndent)
+            >> (try ((: []) <$> parseIf "elseif") <|> try (parseBlock "else"))
+        )
+            <|> return []
 
     parseExpression = parseExpression0
     parseExpression0 = chainl1 parseExpression1 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator0 <* next))
@@ -208,8 +213,10 @@ voidLiteral :: CygnetParser Expression
 voidLiteral = ELiteral LVoid <$ token (try $ string "void") <?> "void"
 
 boolLiteral :: CygnetParser Expression
-boolLiteral = ELiteral . LBool <$>
-    ((True <$ token (try $ string "true")) <|> (False <$ token (try $ string "false"))) <?> "true or false"
+boolLiteral =
+    ELiteral . LBool
+        <$> ((True <$ token (try $ string "true")) <|> (False <$ token (try $ string "false")))
+        <?> "true or false"
 
 stringLiteral :: CygnetParser String
 stringLiteral = token (char '"' *> many quotedChar <* char '"') <?> "string"

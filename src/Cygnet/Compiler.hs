@@ -3,7 +3,7 @@
 
 module Cygnet.Compiler (CompilerOptions (..), compile) where
 
-import Control.Monad (when, unless)
+import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.State (StateT, get, gets, modify, runStateT)
 
@@ -100,7 +100,7 @@ getCygnetTopLevelName :: String -> String
 getCygnetTopLevelName name = "cyg_tl_" ++ mangleName name
 
 getAnonymousParameterNames :: [String]
-getAnonymousParameterNames = map (\n -> "_cyg_anon_" ++ show (n :: Int)) [0..]
+getAnonymousParameterNames = map (\n -> "_cyg_anon_" ++ show (n :: Int)) [0 ..]
 
 compileValue :: Value -> String
 compileValue value =
@@ -123,13 +123,15 @@ compileApplyValue :: Value -> [Expression] -> CompileMonad String
 compileApplyValue value args =
     case args of
         [] -> case getType value of
-                TFunction TVoid _ _ -> return $ compileValue value ++ "()"
-                _ -> return $ compileValue value
-        _ -> if length args < getArity value
+            TFunction TVoid _ _ -> return $ compileValue value ++ "()"
+            _ -> return $ compileValue value
+        _ ->
+            if length args < getArity value
                 then compilePartialApply value args
-                else if length args == getArity value || isVariadic value
-                    then compileCompleteApply value args
-                    else error "Function applied to too many arguments"
+                else
+                    if length args == getArity value || isVariadic value
+                        then compileCompleteApply value args
+                        else error "Function applied to too many arguments"
   where
     compileCompleteApply f exprs =
         case f of
@@ -222,13 +224,15 @@ builtIns =
                     case values of
                         [x, y] -> return $ def x y
                         _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
-         in (name, BuiltIn
-                    { builtInName = name
-                    , builtInType = TFunction a (TFunction b c False) False
-                    , builtInArity = 2
-                    , builtInPartialApply = False
-                    , builtInCompile = compileBinary
-                    })
+         in ( name
+            , BuiltIn
+                { builtInName = name
+                , builtInType = TFunction a (TFunction b c False) False
+                , builtInArity = 2
+                , builtInPartialApply = False
+                , builtInCompile = compileBinary
+                }
+            )
     lazyBinaryAnd name =
         let compileAnd exprs =
                 case exprs of
@@ -245,13 +249,15 @@ builtIns =
                         emitIndented "}\n"
                         return $ compileValue result
                     _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
-         in (name, BuiltIn
-                    { builtInName = name
-                    , builtInType = TFunction TBool (TFunction TBool TBool False) False
-                    , builtInArity = 2
-                    , builtInPartialApply = True
-                    , builtInCompile = compileAnd
-                    })
+         in ( name
+            , BuiltIn
+                { builtInName = name
+                , builtInType = TFunction TBool (TFunction TBool TBool False) False
+                , builtInArity = 2
+                , builtInPartialApply = True
+                , builtInCompile = compileAnd
+                }
+            )
     lazyBinaryOr name =
         let compileOr exprs =
                 case exprs of
@@ -268,13 +274,15 @@ builtIns =
                         emitIndented "}\n"
                         return $ compileValue result
                     _ -> error $ "Binary operator applied to " ++ show (length exprs) ++ " arguments"
-         in (name, BuiltIn
-                    { builtInName = name
-                    , builtInType = TFunction TBool (TFunction TBool TBool False) False
-                    , builtInArity = 2
-                    , builtInPartialApply = True
-                    , builtInCompile = compileOr
-                    })
+         in ( name
+            , BuiltIn
+                { builtInName = name
+                , builtInType = TFunction TBool (TFunction TBool TBool False) False
+                , builtInArity = 2
+                , builtInPartialApply = True
+                , builtInCompile = compileOr
+                }
+            )
 
 resolve :: String -> CompileMonad Value
 resolve name = do
@@ -293,11 +301,15 @@ resolve name = do
                         _ -> do
                             st <- get
                             let cygLookups = map (Map.lookup name . moduleSymbols) (compilerImports st)
-                            let cygResolved = map CygnetSymbolValue $
-                                    sortOn (\(Symbol _ _ name' _) -> name') . nub $ catMaybes cygLookups
+                            let cygResolved =
+                                    map CygnetSymbolValue $
+                                        sortOn (\(Symbol _ _ name' _) -> name') . nub $
+                                            catMaybes cygLookups
                             let cLookups = map (Map.lookup name) (compilerIncludes st)
-                            let cResolved = map CSymbolValue $
-                                    sortOn symbolName . nub $ catMaybes cLookups
+                            let cResolved =
+                                    map CSymbolValue $
+                                        sortOn symbolName . nub $
+                                            catMaybes cLookups
                             let resolved = cygResolved ++ cResolved
                             if null resolved
                                 then return $ UnresolvedValue name
@@ -371,8 +383,11 @@ emit :: String -> CompileMonad ()
 emit text = modify $ \st -> st{compilerResult = Text.append (compilerResult st) (Text.pack text)}
 
 emitIndented :: String -> CompileMonad ()
-emitIndented text = modify $ \st -> st{compilerResult =
-    Text.append (compilerResult st) (Text.pack (concat (replicate (compilerDepth st) "    ") ++ text))}
+emitIndented text = modify $ \st ->
+    st
+        { compilerResult =
+            Text.append (compilerResult st) (Text.pack (concat (replicate (compilerDepth st) "    ") ++ text))
+        }
 
 pushIndent :: CompileMonad ()
 pushIndent = modify $ \st -> st{compilerDepth = compilerDepth st + 1}
@@ -557,9 +572,10 @@ convertCToCygnet ctype =
         CT_LDouble -> undefined
         CT_Bool -> TBool
         CT_Function r ps v ->
-            let funcType = buildFuncType
-                    $ map convertCToCygnet
-                    $ if null ps then [CT_Void, r] else ps ++ [r]
+            let funcType =
+                    buildFuncType $
+                        map convertCToCygnet $
+                            if null ps then [CT_Void, r] else ps ++ [r]
              in case funcType of
                     TFunction a b _ -> TFunction a b v
                     _ -> funcType
@@ -629,29 +645,29 @@ compileFuncDecl access linkage name ftype params =
 
 compileFuncDef :: Access -> Linkage -> String -> Block -> Type -> [String] -> CompileMonad ()
 compileFuncDef access linkage name fbody ftype params = do
-        let paramCount = length params
-        uncurriedParams <- beginFuncDef
-        let anonCount = length uncurriedParams - paramCount
-        let fbody' = decurryFunction anonCount fbody
-        let retType = fromJust $ getPartialType (length params) ftype
-        value <- compileBlock fbody'
-        if retType /= TVoid && value /= NoValue
-            then emitIndented ("return " ++ compileValue value ++ ";\n") >> endFuncDef
-            else endFuncDef
-    where
-        beginFuncDef = do
-            resetVars
-            resetAnonymous
-            pushLocalBlock
-            let fparams = getFuncParams ftype params
-            emit $ compileFuncProto access linkage name ftype fparams ++ "\n{\n"
-            traverse_ assignVar fparams
-            pushIndent
-            return fparams
-        endFuncDef = do
-            popIndent
-            emit "}\n\n"
-            popLocalBlock
+    let paramCount = length params
+    uncurriedParams <- beginFuncDef
+    let anonCount = length uncurriedParams - paramCount
+    let fbody' = decurryFunction anonCount fbody
+    let retType = fromJust $ getPartialType (length params) ftype
+    value <- compileBlock fbody'
+    if retType /= TVoid && value /= NoValue
+        then emitIndented ("return " ++ compileValue value ++ ";\n") >> endFuncDef
+        else endFuncDef
+  where
+    beginFuncDef = do
+        resetVars
+        resetAnonymous
+        pushLocalBlock
+        let fparams = getFuncParams ftype params
+        emit $ compileFuncProto access linkage name ftype fparams ++ "\n{\n"
+        traverse_ assignVar fparams
+        pushIndent
+        return fparams
+    endFuncDef = do
+        popIndent
+        emit "}\n\n"
+        popLocalBlock
 
 assignVar :: Value -> CompileMonad ()
 assignVar value =
@@ -665,12 +681,12 @@ decurryFunction anonArgs block =
     if anonArgs == 0
         then block
         else case block of
-                [] -> []
-                [st] -> [decurryStatement anonArgs st]
-                (st : sts) ->
-                    case st of
-                        SReturn expr -> SReturn (decurryExpr anonArgs expr) : decurryFunction anonArgs sts
-                        _ -> st : decurryFunction anonArgs sts
+            [] -> []
+            [st] -> [decurryStatement anonArgs st]
+            (st : sts) ->
+                case st of
+                    SReturn expr -> SReturn (decurryExpr anonArgs expr) : decurryFunction anonArgs sts
+                    _ -> st : decurryFunction anonArgs sts
   where
     decurryStatement aargs st =
         case st of
@@ -687,11 +703,11 @@ decurryFunction anonArgs block =
 
 compileBlock :: Block -> CompileMonad Value
 compileBlock blk = getLastValue <$> traverse compileStatement blk
-    where
-        getLastValue values =
-            case values of
-                [] -> NoValue
-                _ -> last values
+  where
+    getLastValue values =
+        case values of
+            [] -> NoValue
+            _ -> last values
 
 compileStatement :: Statement -> CompileMonad Value
 compileStatement st =
@@ -705,8 +721,9 @@ compileReturn :: Expression -> CompileMonad Value
 compileReturn expr =
     case expr of
         ELiteral LVoid -> emitIndented "return;\n" >> return NoValue
-        _ -> compileExpression expr >>= \var ->
-            emitIndented ("return " ++ compileValue var ++ ";\n") >> return NoValue
+        _ ->
+            compileExpression expr >>= \var ->
+                emitIndented ("return " ++ compileValue var ++ ";\n") >> return NoValue
 
 compileLet :: [Assignment] -> CompileMonad Value
 compileLet assignments =
@@ -761,7 +778,8 @@ compileIf cond t e = do
     emitIndented "{\n"
     pushIndent
     thenResult <- compileBlock t
-    when (resultType /= TVoid && resultVar /= NoValue)
+    when
+        (resultType /= TVoid && resultVar /= NoValue)
         (emitIndented $ compileValue resultVar ++ " = " ++ compileValue thenResult ++ ";\n")
     unless (null e) $ do
         popIndent
@@ -770,7 +788,8 @@ compileIf cond t e = do
         emitIndented "{\n"
         pushIndent
         elseResult <- compileBlock e
-        when (resultType /= TVoid && resultVar /= NoValue)
+        when
+            (resultType /= TVoid && resultVar /= NoValue)
             (emitIndented $ compileValue resultVar ++ " = " ++ compileValue elseResult ++ ";\n")
     popIndent
     emitIndented "}\n"
@@ -799,8 +818,9 @@ compileApply exprs = do
     f <- compileExpression $ head exprs
     (left, result) <- case resultType of
         TVoid -> return ("", NoValue)
-        _ -> genVar resultType >>= \var ->
-            return (compileTypeName resultType ++ " " ++ compileValue var ++ " = ", var)
+        _ ->
+            genVar resultType >>= \var ->
+                return (compileTypeName resultType ++ " " ++ compileValue var ++ " = ", var)
     right <- compileApplyValue f $ tail exprs
     emitIndented $ left ++ right ++ ";\n"
     return result
@@ -834,8 +854,11 @@ parseCHeader header = do
     parseResult <- liftIO $ parse (includeDirs opts) header
     case parseResult of
         Just symbols ->
-            let symbolsMap = Map.fromList $ [(name, symbol) |
-                    symbol@(CSymbol{symbolName = name}) <- symbols]
+            let symbolsMap =
+                    Map.fromList $
+                        [ (name, symbol)
+                        | symbol@(CSymbol{symbolName = name}) <- symbols
+                        ]
              in modify $ \st -> st{compilerIncludes = compilerIncludes st ++ [symbolsMap]}
         _ -> error $ "Failed to parse \"" ++ header ++ "\""
 
@@ -902,10 +925,9 @@ getPartialType :: Int -> Type -> Maybe Type
 getPartialType args f =
     if args == 0
         then Just f
-        else
-            case f of
-                TFunction _ r _ -> getPartialType (args - 1) r
-                _ -> Nothing
+        else case f of
+            TFunction _ r _ -> getPartialType (args - 1) r
+            _ -> Nothing
 
 getApplyType :: [Type] -> Variadic -> Maybe Type
 getApplyType t variadic =
@@ -918,7 +940,8 @@ getApplyType t variadic =
                     if unifies x a
                         then getApplyType (b : xs) variadic
                         else Nothing
-                _ -> if variadic
+                _ ->
+                    if variadic
                         then getApplyType (x : xs) variadic
                         else Nothing
 
