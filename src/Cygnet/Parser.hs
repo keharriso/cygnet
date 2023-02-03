@@ -152,7 +152,7 @@ parseBody name =
             (SLet as) : (SLet bs) : sts' -> mergeLets $ SLet (as ++ bs) : sts'
             st : sts' -> st : mergeLets sts'
             [] -> []
-    parseStatement = (parseReturn <|> parseLet <|> parseIf "if" <|> (SExpression <$> parseExpression)) <* next
+    parseStatement = (parseReturn <|> parseLet <|> parseAssign <|> parseIf "if" <|> (SExpression <$> parseExpression)) <* next
     parseBlock kw =
         let parseBlockBegin = parseKeyword kw >> next >> parseBlockBody
             parseBlockBody = sameOrIndented >> withPos (endBy1 (checkIndent >> parseStatement) next)
@@ -161,12 +161,23 @@ parseBody name =
     parseLet =
         withPos
             ( do
-                var <- parseKeyword "let" >> next >> sameOrIndented >> token parseSymbolName <* next
+                parseKeyword "let" >> next >> sameOrIndented
+                mutable <- (True <$ parseKeyword "mut") <|> return False
+                var <- next >> sameOrIndented >> token parseSymbolName <* next
                 args <- parseParams <* next
                 sameOrIndented >> token (char '=') >> next
                 statement <- sameOrIndented >> parseStatement
-                return $ SLet [Assignment var args statement]
+                return $ SLet [Assignment mutable var args statement]
             )
+    parseAssign =
+        withPos $
+            try
+                ( do
+                    var <- token parseSymbolName <* next
+                    sameOrIndented >> parseKeyword ":=" >> next
+                    statement <- sameOrIndented >> parseStatement
+                    return $ SAssign var statement
+                )
     parseIf kw =
         withPos
             ( do
@@ -205,7 +216,7 @@ parseBody name =
     parseNamed = notFollowedBy parseAnyKeyword >> (ENamed <$> token parseSymbolName <* next)
     parseParenExpr = char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
     parseAnyKeyword =
-        let kws = ["module", "import", "include", "export", "foreign", "do", "if", "then", "else", "elseif"]
+        let kws = ["module", "import", "include", "export", "foreign", "do", "if", "then", "else", "elseif", "let", "mut"]
          in choice (map parseKeyword kws) <?> "keyword"
     parseKeyword kw = void $ try (token $ string kw)
 

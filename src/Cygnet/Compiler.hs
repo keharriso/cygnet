@@ -21,7 +21,6 @@ import Data.Text qualified as Text
 import Ocelot
 
 import Cygnet.AST
-import Cygnet.AST (TopLevel)
 
 data CompilerOptions = CompilerOptions {includeDirs :: [String]}
     deriving (Show)
@@ -30,7 +29,7 @@ data CompileState = CompileState
     { compilerOptions :: CompilerOptions
     , compilerImports :: [Import]
     , compilerIncludes :: [Map String CSymbol]
-    , compilerLocals :: [Map String Type]
+    , compilerLocals :: [Map String LocalVariable]
     , compilerAnonymous :: [(String, Type)]
     , compilerDepth :: Int
     , compilerNextVar :: Int
@@ -39,6 +38,9 @@ data CompileState = CompileState
     }
 
 type Import = Module
+
+data LocalVariable = LocalVariable Type Mutable
+    deriving (Eq, Show)
 
 type CompileResult = Text
 
@@ -82,7 +84,7 @@ compile opts unit = do
 
 data Value
     = TemporaryValue Int Type
-    | LocalValue String Type
+    | LocalValue String LocalVariable
     | AnonymousValue String Type
     | PartialValue Value [Value]
     | BuiltInValue BuiltIn
@@ -146,7 +148,7 @@ getType :: Value -> Type
 getType v =
     case v of
         TemporaryValue _ t -> t
-        LocalValue _ t -> t
+        LocalValue _ (LocalVariable t _) -> t
         AnonymousValue _ t -> t
         PartialValue f args ->
             let types = map getType (f : args)
@@ -162,7 +164,7 @@ getArity :: Value -> Int
 getArity v =
     case v of
         TemporaryValue _ t -> typeArity t
-        LocalValue _ t -> typeArity t
+        LocalValue _ (LocalVariable t _) -> typeArity t
         PartialValue f args -> getArity f - length args
         BuiltInValue builtIn -> builtInArity builtIn
         CSymbolValue (CSymbol{symbolType = CT_Function _ params _}) -> length params
@@ -351,18 +353,19 @@ statementDependencies st =
         SReturn expr -> expressionDependencies expr
         SExpression expr -> expressionDependencies expr
         SLet assignments -> do
-            traverse_ (\(Assignment f _ _) -> putLocal f TVoid) assignments
+            traverse_ (\(Assignment mut f _ _) -> putLocal f $ LocalVariable TVoid mut) assignments
             Set.unions <$> traverse assignmentDependencies assignments
+        SAssign _ st' -> statementDependencies st'
         SIf cond tBranch fBranch -> do
             condDeps <- expressionDependencies cond
             tBranchDeps <- blockDependencies tBranch
             fBranchDeps <- blockDependencies fBranch
             return $ Set.unions [condDeps, tBranchDeps, fBranchDeps]
   where
-    assignmentDependencies (Assignment _ args st') =
+    assignmentDependencies (Assignment mut _ args st') =
         do
             pushLocalBlock
-            traverse_ (`putLocal` TVoid) args
+            traverse_ (\arg -> putLocal arg $ LocalVariable TVoid mut) args
             deps <- statementDependencies st'
             popLocalBlock
             return deps
@@ -401,7 +404,7 @@ pushLocalBlock = modify $ \st -> st{compilerLocals = Map.empty : compilerLocals 
 popLocalBlock :: CompileMonad ()
 popLocalBlock = modify $ \st -> st{compilerLocals = tail (compilerLocals st)}
 
-putLocal :: String -> Type -> CompileMonad ()
+putLocal :: String -> LocalVariable -> CompileMonad ()
 putLocal var varType = do
     (localBlock : parentBlocks) <- gets compilerLocals
     let local = Map.lookup var localBlock
@@ -409,7 +412,7 @@ putLocal var varType = do
         Nothing -> modify $ \st -> st{compilerLocals = Map.insert var varType localBlock : parentBlocks}
         _ -> error $ "Duplicate variable name: " ++ var
 
-setLocal :: String -> Type -> CompileMonad ()
+setLocal :: String -> LocalVariable -> CompileMonad ()
 setLocal var varType = do
     (localBlock : parentBlocks) <- gets compilerLocals
     modify $ \st -> st{compilerLocals = Map.insert var varType localBlock : parentBlocks}
@@ -631,12 +634,12 @@ compileFuncParams params =
 
 compileSymbolDecl :: Symbol -> String
 compileSymbolDecl symbol = case symbol of
-    Symbol access linkage name (Function _ ftype params) ->
+    Symbol access linkage _ (Function _ ftype params) ->
         compileFuncDecl access linkage (compileValue $ CygnetSymbolValue symbol) ftype params
 
 compileSymbolDef :: Symbol -> CompileMonad ()
 compileSymbolDef symbol = case symbol of
-    Symbol access linkage name (Function fbody ftype params) ->
+    Symbol access linkage _ (Function fbody ftype params) ->
         compileFuncDef access linkage (compileValue $ CygnetSymbolValue symbol) fbody ftype params
 
 compileFuncDecl :: Access -> Linkage -> String -> Type -> [String] -> String
@@ -714,6 +717,7 @@ compileStatement st =
     case st of
         SReturn expr -> compileReturn expr
         SLet assignments -> compileLet assignments
+        SAssign var st -> compileAssign var st
         SIf cond t e -> compileIf cond t e
         SExpression expr -> compileExpression expr
 
@@ -731,36 +735,50 @@ compileLet assignments =
         let quantifyTypeVars vars =
                 do
                     tvars <- traverse (const genTypeVar) vars
-                    traverse_ (\(var, tvar) -> putLocal var (TVar tvar)) (zip vars tvars)
-        let getAssignmentType (Assignment _ args st) =
+                    traverse_ (\((mut, var), tvar) -> putLocal var (LocalVariable (TVar tvar) mut)) (zip vars tvars)
+        let getAssignmentType (Assignment mut _ args st) =
                 do
                     pushLocalBlock
-                    quantifyTypeVars args
+                    quantifyTypeVars $ zip (repeat False) args
                     t <- getStatementType st
                     popLocalBlock
-                    return t
+                    return $ LocalVariable t mut
         let getAssignmentTypes as =
                 do
-                    let vars = Set.fromList $ map (\(Assignment var _ _) -> var) as
-                    quantifyTypeVars $ Set.toList vars
+                    let vars = map (\(Assignment mut var _ _) -> (mut, var)) as
+                    quantifyTypeVars vars
                     traverse getAssignmentType as
-        let compileAssignment (Assignment var args st, assignmentType) =
+        let compileAssignment (Assignment _ var args st, assignmentType@(LocalVariable at _)) =
                 do
                     pushLocalBlock
-                    quantifyTypeVars args
+                    quantifyTypeVars $ zip (repeat False) args
                     valVar <- compileStatement st
                     popLocalBlock
                     case valVar of
                         NoValue -> error $ "Assigning void to variable \"" ++ var ++ "\""
                         _ ->
                             do
+                                let assignVal = LocalValue var assignmentType
                                 setLocal var assignmentType
-                                let varName = compileValue $ LocalValue var assignmentType
-                                let varDecl = compileTypeName assignmentType ++ " " ++ varName
+                                let varName = compileValue $ assignVal
+                                let varDecl = compileTypeName at ++ " " ++ varName
                                 emitIndented $ varDecl ++ " = " ++ compileValue valVar ++ ";\n"
         assignmentTypes <- getAssignmentTypes assignments
         traverse_ compileAssignment (zip assignments assignmentTypes)
         return NoValue
+
+compileAssign :: String -> Statement -> CompileMonad Value
+compileAssign var st = do
+    assignVal <- resolve var
+    case assignVal of
+        LocalValue _ (LocalVariable _ mut) ->
+            if mut
+                then do
+                    stVar <- compileStatement st
+                    emitIndented $ compileValue assignVal ++ " = " ++ compileValue stVar ++ ";\n"
+                    return NoValue
+                else error $ "Assignment to non-mutable variable \"" ++ var ++ "\""
+        _ -> error $ "Assignment to non-variable \"" ++ var ++ "\""
 
 compileIf :: Expression -> Block -> Block -> CompileMonad Value
 compileIf cond t e = do
@@ -900,7 +918,7 @@ getExpressionType expr =
             do
                 resolved <- resolve name
                 case resolved of
-                    LocalValue _ t -> return t
+                    LocalValue _ (LocalVariable t _) -> return t
                     AnonymousValue _ t -> return t
                     BuiltInValue builtIn -> return $ builtInType builtIn
                     CSymbolValue csym -> return $ convertCToCygnet $ symbolType csym
@@ -954,7 +972,7 @@ getFuncParams ftype = getFuncParams' (getFuncParamTypes ftype)
             ([], []) -> []
             ([], _) -> error "Too many parameters to function"
             (ts, []) -> zipWith AnonymousValue getAnonymousParameterNames ts
-            (ptype : pts, param : ps) -> LocalValue param ptype : getFuncParams' pts ps
+            (ptype : pts, param : ps) -> LocalValue param (LocalVariable ptype False) : getFuncParams' pts ps
     getFuncParamTypes ft =
         case ft of
             TFunction param ret _ -> param : getFuncParamTypes ret

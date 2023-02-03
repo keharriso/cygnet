@@ -10,6 +10,7 @@ module Cygnet.AST (
     Expression (..),
     Literal (..),
     Type (..),
+    Mutable,
     Variadic,
     symbolIsFunction,
     symbolGetType,
@@ -51,12 +52,15 @@ type Block = [Statement]
 data Statement
     = SReturn Expression
     | SLet [Assignment]
+    | SAssign String Statement
     | SIf Expression Block Block
     | SExpression Expression
     deriving (Eq, Show)
 
-data Assignment = Assignment String [String] Statement
+data Assignment = Assignment Mutable String [String] Statement
     deriving (Eq, Show)
+
+type Mutable = Bool
 
 data Expression
     = EApply [Expression]

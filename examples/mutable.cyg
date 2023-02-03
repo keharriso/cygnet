@@ -1,0 +1,8 @@
+# Mutable assignment
+
+mutable : void -> int
+mutable = do
+    let mut x = 0
+    x := x + 1
+    x := x + 1
+    return x
