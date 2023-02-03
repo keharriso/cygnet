@@ -38,6 +38,9 @@ library
     , indents ==0.5.*
     , ocelot
     , parsec ==3.1.*
+    , process ==1.6.*
+    , split ==0.2.*
+    , temporary ==1.3.*
     , text ==1.2.*
     , transformers ==0.5.*
   default-language: Haskell2010
@@ -56,6 +59,9 @@ executable cygnet-exe
     , indents ==0.5.*
     , ocelot
     , parsec ==3.1.*
+    , process ==1.6.*
+    , split ==0.2.*
+    , temporary ==1.3.*
     , text ==1.2.*
     , transformers ==0.5.*
   default-language: Haskell2010
@@ -74,6 +80,9 @@ test-suite cygnet-test
     , cygnet
     , indents ==0.5.*
     , parsec ==3.1.*
+    , process ==1.6.*
+    , split ==0.2.*
+    , temporary ==1.3.*
     , text ==1.2.*
     , transformers ==0.5.*
   default-language: Haskell2010

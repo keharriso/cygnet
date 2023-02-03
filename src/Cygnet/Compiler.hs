@@ -22,7 +22,10 @@ import Ocelot
 
 import Cygnet.AST
 
-data CompilerOptions = CompilerOptions {includeDirs :: [String]}
+data CompilerOptions = CompilerOptions
+    { includeDirs :: [FilePath]
+    , verbose :: Bool
+    }
     deriving (Show)
 
 data CompileState = CompileState
@@ -63,6 +66,8 @@ compile opts unit = do
     ((), st) <-
         runStateT
             ( do
+                parseCHeader "stddef.h"
+                parseCHeader "stdint.h"
                 traverse_ parseCHeader (moduleIncludes unit)
                 let symbols = Map.elems $ moduleSymbols unit
                 let fnSymbols = filter symbolIsFunction symbols
