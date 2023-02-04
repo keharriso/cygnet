@@ -6,6 +6,7 @@ import Control.Monad (void)
 
 import Data.Char (chr)
 import Data.Functor (($>))
+import Data.List (foldl1')
 import Data.Map qualified as Map
 
 import Text.Parsec hiding (token)
@@ -122,17 +123,50 @@ parseOperator5 = token $ (:) <$> oneOf "*/%" <*> many operatorChar
 parseTypeName :: CygnetParser String
 parseTypeName = parseSymbolName
 
+atomicTypes :: [(String, Type)]
+atomicTypes =
+    [ ("void", TVoid)
+    , ("byte", TByte)
+    , ("ubyte", TUByte)
+    , ("short", TShort)
+    , ("ushort", TUShort)
+    , ("int", TInt)
+    , ("uint", TUInt)
+    , ("long", TLong)
+    , ("ulong", TULong)
+    , ("llong", TLLong)
+    , ("ullong", TULLong)
+    , ("float", TFloat)
+    , ("double", TDouble)
+    , ("ldouble", TLDouble)
+    , ("bool", TBool)
+    ]
+
 parseType :: CygnetParser Type
 parseType = do
-    curriedTypes <- sepBy1 (sameOrIndented >> parseAtomicType <* next) (sameOrIndented >> string "->" >> next)
+    curriedTypes <- sepBy1 (sameOrIndented >> parseTypeApply <* next) (sameOrIndented >> parseKeyword "->" >> next) <?> "type"
     return $ foldr1 (\a b -> TFunction a b False) curriedTypes
   where
-    parseAtomicType =
-        try (TVoid <$ string "void")
-            <|> try (TBool <$ string "bool")
-            <|> try (TString <$ string "string")
-            <|> try (TInt <$ string "int")
-            <|> try (TDouble <$ string "double")
+    parseTypeApply = do
+        appliedTypes <- endBy1 (sameOrIndented >> parseTypeArg) next
+        return $ resolveBuiltIns $ foldl1' TConstructor appliedTypes
+    parseTypeArg = parseTypeVar <|> parseNamedType <|> parseParenType
+    parseTypeVar = TVar <$> try (token (count 1 letter)) <?> "type variable"
+    parseNamedType = TNamed <$> try (token parseTypeName) <?> "named type"
+    parseParenType = char '(' >> next >> parseType <* next <* char ')' <* next
+    resolveBuiltIns t =
+        case t of
+            TNamed name ->
+                let atomicType = lookup name atomicTypes
+                 in case atomicType of
+                        Just t' -> t'
+                        _ -> t
+            TConstructor a b ->
+                case a of
+                    TNamed "ptr" -> TPtr (resolveBuiltIns b)
+                    _ -> TConstructor a (resolveBuiltIns b)
+            TFunction a b v -> TFunction (resolveBuiltIns a) (resolveBuiltIns b) v
+            _ -> t
 
 parseBody :: String -> CygnetParser ([String], Block)
 parseBody name =
@@ -216,9 +250,26 @@ parseBody name =
     parseNamed = notFollowedBy parseAnyKeyword >> (ENamed <$> token parseSymbolName <* next)
     parseParenExpr = char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
     parseAnyKeyword =
-        let kws = ["module", "import", "include", "export", "foreign", "do", "if", "then", "else", "elseif", "let", "mut"]
+        let kws =
+                [ "module"
+                , "import"
+                , "include"
+                , "export"
+                , "foreign"
+                , "do"
+                , "if"
+                , "then"
+                , "else"
+                , "elseif"
+                , "let"
+                , "mut"
+                , "ptr"
+                ]
+                    ++ map fst atomicTypes
          in choice (map parseKeyword kws) <?> "keyword"
-    parseKeyword kw = void $ try (token $ string kw)
+
+parseKeyword :: String -> CygnetParser ()
+parseKeyword kw = void $ try (token $ string kw)
 
 voidLiteral :: CygnetParser Expression
 voidLiteral = ELiteral LVoid <$ token (try $ string "void") <?> "void"

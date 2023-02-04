@@ -67,13 +67,12 @@ getSystemIncludeDirs :: CompilerOptions -> IO [FilePath]
 getSystemIncludeDirs _ = do
     (_, flags) <- withSystemTempFile "cygtmp.c" (\path _ -> readCommand "clang" ["-###", path])
     let flags' = splitOn "\" \"" flags
-    let includeDirs = parseIncludeDirs flags'
-    return includeDirs
+    return $ parseIncludeDirs flags'
   where
     parseIncludeDirs args =
         case args of
             ("-internal-isystem" : dir : args') -> cleanDir dir : parseIncludeDirs args'
-            (arg : args') -> parseIncludeDirs args'
+            (_ : args') -> parseIncludeDirs args'
             [] -> []
     cleanDir dir =
         case dir of

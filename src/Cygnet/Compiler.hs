@@ -66,8 +66,6 @@ compile opts unit = do
     ((), st) <-
         runStateT
             ( do
-                parseCHeader "stddef.h"
-                parseCHeader "stdint.h"
                 traverse_ parseCHeader (moduleIncludes unit)
                 let symbols = Map.elems $ moduleSymbols unit
                 let fnSymbols = filter symbolIsFunction symbols
@@ -80,7 +78,8 @@ compile opts unit = do
                 let externalDeps = filter isExternal fnResolvedDeps
                 traverse_ compileResolvedFunctionSymbol externalDeps
                 emit "\n"
-                traverse_ (emit . compileSymbolDecl) fnSymbols
+                fnDecls <- traverse compileSymbolDecl fnSymbols
+                traverse_ emit fnDecls
                 emit "\n"
                 traverse_ compileSymbolDef fnSymbols
             )
@@ -246,7 +245,8 @@ builtIns =
                     [a, b] -> do
                         a' <- compileExpression a
                         result <- genVar TBool
-                        emitIndented $ compileTypeName TBool ++ " " ++ compileValue result ++ " = 0;\n"
+                        boolName <- compileTypeName TBool
+                        emitIndented $ boolName ++ " " ++ compileValue result ++ " = 0;\n"
                         emitIndented $ "if (" ++ compileValue a' ++ ")\n"
                         emitIndented "{\n"
                         pushIndent
@@ -271,7 +271,8 @@ builtIns =
                     [a, b] -> do
                         a' <- compileExpression a
                         result <- genVar TBool
-                        emitIndented $ compileTypeName TBool ++ " " ++ compileValue result ++ " = 1;\n"
+                        boolName <- compileTypeName TBool
+                        emitIndented $ boolName ++ " " ++ compileValue result ++ " = 1;\n"
                         emitIndented $ "if (!" ++ compileValue a' ++ ")\n"
                         emitIndented "{\n"
                         pushIndent
@@ -468,7 +469,7 @@ compileResolvedFunctionSymbol value =
         PartialValue _ _ -> error "Expected top-level function, got partial application"
         BuiltInValue _ -> return ()
         CSymbolValue csym -> compileCFuncDecl csym >>= emit
-        CygnetSymbolValue cygsym -> emit $ compileSymbolDecl cygsym
+        CygnetSymbolValue cygsym -> compileSymbolDecl cygsym >>= emit
         AmbiguousValue name _ -> error $ "Ambiguous symbol: \"" ++ name ++ "\""
         UnresolvedValue name -> error $ "Unresolved symbol: \"" ++ name ++ "\""
         NoValue -> error "No value"
@@ -561,23 +562,25 @@ convertCToCygnet ctype =
     case ctype of
         CT_Void -> TVoid
         CT_Pointer t n ->
-            case (t, n) of
-                (CT_Char, 1) -> TString
-                _ -> undefined
-        CT_Array t n -> undefined
-        CT_Char -> undefined
-        CT_UChar -> undefined
-        CT_Short -> undefined
-        CT_UShort -> undefined
+            let buildPtrType n' =
+                    if n' == 0
+                        then convertCToCygnet t
+                        else TPtr (buildPtrType (n' - 1))
+             in buildPtrType n
+        CT_Array t _ -> convertCToCygnet (CT_Pointer t 1)
+        CT_Char -> TByte
+        CT_UChar -> TUByte
+        CT_Short -> TShort
+        CT_UShort -> TUShort
         CT_Int -> TInt
-        CT_UInt -> undefined
-        CT_Long -> undefined
-        CT_ULong -> undefined
-        CT_LLong -> undefined
-        CT_ULLong -> undefined
-        CT_Float -> undefined
+        CT_UInt -> TUInt
+        CT_Long -> TLong
+        CT_ULong -> TULong
+        CT_LLong -> TLLong
+        CT_ULLong -> TULLong
+        CT_Float -> TFloat
         CT_Double -> TDouble
-        CT_LDouble -> undefined
+        CT_LDouble -> TLDouble
         CT_Bool -> TBool
         CT_Function r ps v ->
             let funcType =
@@ -590,7 +593,7 @@ convertCToCygnet ctype =
         CT_Struct fs -> undefined
         CT_Union fs -> undefined
         CT_Enum fs -> undefined
-        CT_Named n -> undefined
+        CT_Named n -> TNamed n
   where
     buildFuncType curriedTypes =
         case curriedTypes of
@@ -598,17 +601,22 @@ convertCToCygnet ctype =
             [t] -> t
             (t : ts) -> TFunction t (buildFuncType ts) False
 
-compileFuncProto :: Access -> Linkage -> String -> Type -> [Value] -> String
+compileFuncProto :: Access -> Linkage -> String -> Type -> [Value] -> CompileMonad String
 compileFuncProto access linkage name ftype params =
     case ftype of
         TFunction{} ->
-            compileAccess access
-                ++ compileTypeName (fromJust $ getPartialType (length params) ftype)
-                ++ " "
-                ++ name
-                ++ "("
-                ++ intercalate ", " (compileFuncParams params)
-                ++ ")"
+            do
+                typeName <- compileTypeName (fromJust $ getPartialType (length params) ftype)
+                funcParams <- compileFuncParams params
+                return
+                    ( compileAccess access
+                        ++ typeName
+                        ++ " "
+                        ++ name
+                        ++ "("
+                        ++ intercalate ", " funcParams
+                        ++ ")"
+                    )
         _ -> compileFuncProto access linkage name (TFunction TVoid ftype False) params
 
 compileAccess :: Access -> String
@@ -616,28 +624,43 @@ compileAccess access = case access of
     Private -> "static "
     Public -> ""
 
-compileTypeName :: Type -> String
+compileTypeName :: Type -> CompileMonad String
 compileTypeName t =
     case t of
-        TVoid -> "void"
-        TBool -> "int"
-        TString -> "char*"
-        TInt -> "int"
-        TDouble -> "double"
+        TVoid -> return "void"
+        TPtr b -> (++ "*") <$> compileTypeName b
+        TByte -> return "char"
+        TUByte -> return "unsigned char"
+        TShort -> return "short"
+        TUShort -> return "unsigned short"
+        TInt -> return "int"
+        TUInt -> return "unsigned int"
+        TLong -> return "long"
+        TULong -> return "unsigned long"
+        TLLong -> return "long long"
+        TULLong -> return "unsigned long long"
+        TFloat -> return "float"
+        TDouble -> return "double"
+        TLDouble -> return "long double"
+        TBool -> return "int"
         TFunction TVoid a _ -> compileTypeName a
-        TFunction{} -> "<fn type>"
-        TVar a -> "<type var " ++ a ++ ">"
+        TFunction{} -> return $ "<fn type> " ++ show t
+        TNamed name -> resolve name >>= compileTypeName . getType
+        TConstructor _ _ -> return $ "<type constructor> " ++ show t
+        TVar a -> return $ "<type var " ++ a ++ ">"
 
-compileFuncParam :: Value -> String
-compileFuncParam pval = compileTypeName (getType pval) ++ " " ++ compileValue pval
+compileFuncParam :: Value -> CompileMonad String
+compileFuncParam pval = do
+    typeName <- compileTypeName (getType pval)
+    return $ typeName ++ " " ++ compileValue pval
 
-compileFuncParams :: [Value] -> [String]
+compileFuncParams :: [Value] -> CompileMonad [String]
 compileFuncParams params =
     case params of
-        [] -> ["void"]
-        _ -> map compileFuncParam params
+        [] -> return ["void"]
+        _ -> traverse compileFuncParam params
 
-compileSymbolDecl :: Symbol -> String
+compileSymbolDecl :: Symbol -> CompileMonad String
 compileSymbolDecl symbol = case symbol of
     Symbol access linkage _ (Function _ ftype params) ->
         compileFuncDecl access linkage (compileValue $ CygnetSymbolValue symbol) ftype params
@@ -647,9 +670,9 @@ compileSymbolDef symbol = case symbol of
     Symbol access linkage _ (Function fbody ftype params) ->
         compileFuncDef access linkage (compileValue $ CygnetSymbolValue symbol) fbody ftype params
 
-compileFuncDecl :: Access -> Linkage -> String -> Type -> [String] -> String
+compileFuncDecl :: Access -> Linkage -> String -> Type -> [String] -> CompileMonad String
 compileFuncDecl access linkage name ftype params =
-    compileFuncProto access linkage name ftype (getFuncParams ftype params) ++ ";\n"
+    (++ ";\n") <$> compileFuncProto access linkage name ftype (getFuncParams ftype params)
 
 compileFuncDef :: Access -> Linkage -> String -> Block -> Type -> [String] -> CompileMonad ()
 compileFuncDef access linkage name fbody ftype params = do
@@ -668,7 +691,8 @@ compileFuncDef access linkage name fbody ftype params = do
         resetAnonymous
         pushLocalBlock
         let fparams = getFuncParams ftype params
-        emit $ compileFuncProto access linkage name ftype fparams ++ "\n{\n"
+        fproto <- compileFuncProto access linkage name ftype fparams
+        emit $ fproto ++ "\n{\n"
         traverse_ assignVar fparams
         pushIndent
         return fparams
@@ -705,8 +729,8 @@ decurryFunction anonArgs block =
     decurryExpr aargs expr =
         case expr of
             EApply exprs -> EApply $ exprs ++ map ENamed (take aargs getAnonymousParameterNames)
-            ELiteral _ -> error "Decurrying literal expression"
-            ENamed _ -> error "Decurrying named expression"
+            ELiteral _ -> error $ "Decurrying literal expression: " ++ show expr
+            ENamed _ -> error $ "Decurrying named expression: " ++ show expr
             ETyped expr' _ -> decurryExpr aargs expr'
 
 compileBlock :: Block -> CompileMonad Value
@@ -722,7 +746,7 @@ compileStatement st =
     case st of
         SReturn expr -> compileReturn expr
         SLet assignments -> compileLet assignments
-        SAssign var st -> compileAssign var st
+        SAssign var st' -> compileAssign var st'
         SIf cond t e -> compileIf cond t e
         SExpression expr -> compileExpression expr
 
@@ -766,7 +790,8 @@ compileLet assignments =
                                 let assignVal = LocalValue var assignmentType
                                 setLocal var assignmentType
                                 let varName = compileValue $ assignVal
-                                let varDecl = compileTypeName at ++ " " ++ varName
+                                typeName <- compileTypeName at
+                                let varDecl = typeName ++ " " ++ varName
                                 emitIndented $ varDecl ++ " = " ++ compileValue valVar ++ ";\n"
         assignmentTypes <- getAssignmentTypes assignments
         traverse_ compileAssignment (zip assignments assignmentTypes)
@@ -794,7 +819,8 @@ compileIf cond t e = do
             _ ->
                 do
                     var <- genVar resultType
-                    emitIndented $ compileTypeName resultType ++ " " ++ compileValue var ++ ";\n"
+                    typeName <- compileTypeName resultType
+                    emitIndented $ typeName ++ " " ++ compileValue var ++ ";\n"
                     return var
     condVal <- compileExpression cond
     emitIndented $ "if (" ++ compileValue condVal ++ ")\n"
@@ -843,7 +869,8 @@ compileApply exprs = do
         TVoid -> return ("", NoValue)
         _ ->
             genVar resultType >>= \var ->
-                return (compileTypeName resultType ++ " " ++ compileValue var ++ " = ", var)
+                compileTypeName resultType >>= \typeName ->
+                    return (typeName ++ " " ++ compileValue var ++ " = ", var)
     right <- compileApplyValue f $ tail exprs
     emitIndented $ left ++ right ++ ";\n"
     return result
@@ -856,7 +883,7 @@ compileLiteral literal =
         LString s ->
             do
                 let s' = escapeString s
-                var <- genVar TString
+                var <- genVar (TPtr TByte)
                 emitIndented $ "const char* " ++ compileValue var ++ " = " ++ s' ++ ";\n"
                 return var
         LInteger i -> compileAtomicLiteral "int" TInt (show i)
@@ -896,6 +923,7 @@ getStatementType st =
     case st of
         SReturn _ -> return TVoid
         SLet _ -> return TVoid
+        SAssign _ _ -> return TVoid
         SIf _ t e ->
             do
                 tt <- getBlockType t
@@ -916,7 +944,7 @@ getExpressionType expr =
             case literal of
                 LVoid -> return TVoid
                 LBool _ -> return TBool
-                LString _ -> return TString
+                LString _ -> return (TPtr TByte)
                 LInteger _ -> return TInt
                 LFloat _ -> return TDouble
         ENamed name ->

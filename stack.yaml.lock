@@ -7,14 +7,14 @@ packages:
 - completed:
     name: ocelot
     pantry-tree:
-      sha256: 4c1dfac5200521a5a33c43ef4e496af9c1386a1a36f60d355ed4d307f57ee1a9
+      sha256: c790f8d6e13b288feb41cc6f0afc980e679fdd51f48e333a2d7c519147065892
       size: 623
-    sha256: 1378b4e497f322a386410ded9e7b27b6d6841b6bd2fef01ccfc863313419c5cf
-    size: 8409
-    url: https://github.com/keharriso/ocelot-hs/archive/cf66412f7e71743393391561b77867a6f2ec6038.tar.gz
+    sha256: 78f08d739ebebcf957b5f948582e0e66ea8bb59a8bddb4f4766d3206a800d5e1
+    size: 8421
+    url: https://github.com/keharriso/ocelot-hs/archive/c98af1163f0e9830279ea1d6440f261ad937cca7.tar.gz
     version: 0.1.0.0
   original:
-    url: https://github.com/keharriso/ocelot-hs/archive/cf66412f7e71743393391561b77867a6f2ec6038.tar.gz
+    url: https://github.com/keharriso/ocelot-hs/archive/c98af1163f0e9830279ea1d6440f261ad937cca7.tar.gz
 snapshots:
 - completed:
     sha256: 4905c93319aa94aa53da8f41d614d7bacdbfe6c63a8c6132d32e6e62f24a9af4

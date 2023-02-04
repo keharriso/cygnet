@@ -10,6 +10,7 @@ module Cygnet.AST (
     Expression (..),
     Literal (..),
     Type (..),
+    Kind (..),
     Mutable,
     Variadic,
     symbolIsFunction,
@@ -79,15 +80,34 @@ data Literal
 
 data Type
     = TVoid
-    | TBool
-    | TString
+    | TPtr Type
+    | TByte
+    | TUByte
+    | TShort
+    | TUShort
     | TInt
+    | TUInt
+    | TLong
+    | TULong
+    | TLLong
+    | TULLong
+    | TFloat
     | TDouble
+    | TLDouble
+    | TBool
     | TFunction Type Type Variadic
+    | TNamed String
+    | TConstructor Type Type
     | TVar String
     deriving (Eq, Show)
 
 type Variadic = Bool
+
+data Kind
+    = KType
+    | KConstraint
+    | KArrow Kind Kind
+    deriving (Eq, Show)
 
 symbolGetType :: Symbol -> Type
 symbolGetType (Symbol _ _ _ tl) =

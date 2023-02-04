@@ -1,0 +1,37 @@
+# C Types
+
+include "stddef.h"
+include "stdint.h"
+
+atomics : byte
+        -> ubyte
+        -> short
+        -> ushort
+        -> int
+        -> uint
+        -> long
+        -> ulong
+        -> llong
+        -> ullong
+        -> float
+        -> double
+        -> ldouble
+        -> ptr void
+        -> ptr (ptr void)
+        -> void
+atomics a b c d e f g h i j k l m n o = void
+
+stddef : size_t
+       -> void
+stddef a = void
+
+stdint : int8_t
+       -> uint8_t
+       -> int16_t
+       -> uint16_t
+       -> int32_t
+       -> uint32_t
+       -> int64_t
+       -> uint64_t
+       -> void
+stdint a b c d e f g h = void
