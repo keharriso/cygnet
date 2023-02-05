@@ -6,7 +6,6 @@ import Control.Monad (void)
 
 import Data.Char (chr)
 import Data.Functor (($>))
-import Data.List (foldl1')
 import Data.Map qualified as Map
 
 import Text.Parsec hiding (token)
@@ -70,7 +69,13 @@ parseTopLevel =
                         fnType <- parseType
                         next
                         (fnParams, fnBody) <- parseBody name
-                        return $ Symbol access linkage name (Function fnBody fnType fnParams)
+                        let tl =
+                                if not (isConst fnBody)
+                                    then case fnType of
+                                        TFunction{} -> TLFunction fnType fnParams fnBody
+                                        _ -> error $ "Function body doesn't have function type: \"" ++ name ++ "\""
+                                    else TLConstant fnType fnBody
+                        return $ Symbol access linkage name tl
             )
 
 isValidCName :: String -> Bool
@@ -143,18 +148,15 @@ atomicTypes =
     ]
 
 parseType :: CygnetParser Type
-parseType = do
-    curriedTypes <- sepBy1 (sameOrIndented >> parseTypeApply <* next) (sameOrIndented >> parseKeyword "->" >> next) <?> "type"
-    return $ foldr1 (\a b -> TFunction a b False) curriedTypes
+parseType = finalizeType <$> chainr1 (sameOrIndented >> parseTypeProduct <* next) (TFunction False <$ sameOrIndented <* parseKeyword "->" <* next) <?> "type"
   where
-    parseTypeApply = do
-        appliedTypes <- endBy1 (sameOrIndented >> parseTypeArg) next
-        return $ resolveBuiltIns $ foldl1' TConstructor appliedTypes
+    parseTypeProduct = TProduct <$> sepBy1 (sameOrIndented >> parseTypeApply <* next) (sameOrIndented >> parseKeyword "*" >> next) <?> "product type"
+    parseTypeApply = chainl1 (sameOrIndented >> parseTypeArg <* next) (return TConstructor)
     parseTypeArg = parseTypeVar <|> parseNamedType <|> parseParenType
     parseTypeVar = TVar <$> try (token (count 1 letter)) <?> "type variable"
     parseNamedType = TNamed <$> try (token parseTypeName) <?> "named type"
     parseParenType = char '(' >> next >> parseType <* next <* char ')' <* next
-    resolveBuiltIns t =
+    finalizeType t =
         case t of
             TNamed name ->
                 let atomicType = lookup name atomicTypes
@@ -163,9 +165,11 @@ parseType = do
                         _ -> t
             TConstructor a b ->
                 case a of
-                    TNamed "ptr" -> TPtr (resolveBuiltIns b)
-                    _ -> TConstructor a (resolveBuiltIns b)
-            TFunction a b v -> TFunction (resolveBuiltIns a) (resolveBuiltIns b) v
+                    TNamed "ptr" -> TPtr (finalizeType b)
+                    _ -> TConstructor a (finalizeType b)
+            TProduct [t'] -> finalizeType t'
+            TProduct ts -> TProduct $ map finalizeType ts
+            TFunction v a b -> TFunction v (finalizeType a) (finalizeType b)
             _ -> t
 
 parseBody :: String -> CygnetParser ([String], Block)
@@ -176,7 +180,7 @@ parseBody name =
                 token (string name) >> next
                 params <- parseParams
                 body <- sameOrIndented >> token (char '=') >> next >> sameOrIndented >> parseDefinition
-                return (if null params then [] else params, body)
+                return (params, body)
             )
   where
     parseParams = endBy (sameOrIndented >> token parseSymbolName) next

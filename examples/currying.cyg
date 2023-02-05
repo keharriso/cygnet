@@ -1,6 +1,6 @@
 # Currying
 
-add : int -> int -> int
+add : int * int -> int
 add x y = x + y
 
 export foreign increment : int -> int

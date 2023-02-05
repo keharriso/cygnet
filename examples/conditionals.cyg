@@ -34,7 +34,7 @@ nested x =
 not : bool -> bool
 not x = if x then false else true
 
-xor : bool -> bool -> bool
+xor : bool * bool -> bool
 xor a b = a && not b || not a && b
 
 # Test laziness
@@ -50,4 +50,4 @@ putFalse = do
     false
 
 testLazy : void -> void
-testLazy = putTrue || putFalse
+testLazy = putTrue void || putFalse void

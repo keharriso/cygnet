@@ -14,7 +14,9 @@ module Cygnet.AST (
     Mutable,
     Variadic,
     symbolIsFunction,
+    symbolIsConstant,
     symbolGetType,
+    isConst,
 ) where
 
 import Data.Map (Map)
@@ -40,13 +42,23 @@ data Linkage
     deriving (Eq, Show)
 
 data TopLevel
-    = Function Block Type [ParameterName]
+    = TLFunction Type [ParameterName] Block
+    | TLConstant Type Block
     deriving (Eq, Show)
 
 type ParameterName = String
 
 symbolIsFunction :: Symbol -> Bool
-symbolIsFunction (Symbol _ _ _ (Function{})) = True
+symbolIsFunction (Symbol _ _ _ tl) =
+    case tl of
+        TLFunction{} -> True
+        _ -> False
+
+symbolIsConstant :: Symbol -> Bool
+symbolIsConstant (Symbol _ _ _ tl) =
+    case tl of
+        TLConstant{} -> True
+        _ -> False
 
 type Block = [Statement]
 
@@ -95,7 +107,8 @@ data Type
     | TDouble
     | TLDouble
     | TBool
-    | TFunction Type Type Variadic
+    | TProduct [Type]
+    | TFunction Variadic Type Type
     | TNamed String
     | TConstructor Type Type
     | TVar String
@@ -112,4 +125,26 @@ data Kind
 symbolGetType :: Symbol -> Type
 symbolGetType (Symbol _ _ _ tl) =
     case tl of
-        Function _ t _ -> t
+        TLFunction t _ _ -> t
+        TLConstant t _ -> t
+
+isConst :: Block -> Bool
+isConst blk =
+    case blk of
+        [] -> True
+        [st] -> isStatementConst st
+        _ -> False
+  where
+    isStatementConst st =
+        case st of
+            SExpression expr -> isExprConst expr
+            _ -> False
+    isExprConst expr =
+        case expr of
+            ELiteral lit ->
+                case lit of
+                    LBool _ -> True
+                    LInteger _ -> True
+                    LFloat _ -> True
+                    _ -> False
+            _ -> False

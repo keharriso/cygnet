@@ -7,7 +7,7 @@ import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.State (StateT, get, gets, modify, runStateT)
 
-import Data.Foldable (traverse_)
+import Data.Foldable (foldl', traverse_)
 import Data.Functor ((<&>))
 import Data.List (intercalate, nub, sortOn)
 import Data.Map (Map)
@@ -68,19 +68,26 @@ compile opts unit = do
             ( do
                 traverse_ parseCHeader (moduleIncludes unit)
                 let symbols = Map.elems $ moduleSymbols unit
+                let constSymbols = filter symbolIsConstant symbols
+                unless
+                    (null constSymbols)
+                    (traverse_ compileSymbolDef constSymbols >> emit "\n")
                 let fnSymbols = filter symbolIsFunction symbols
                 fnDependencies <- Set.toList . Set.unions <$> traverse symbolDependencies fnSymbols
                 fnResolvedDeps <- traverse resolve fnDependencies
                 let isExternal dep =
                         case dep of
+                            BuiltInValue _ -> False
                             CygnetSymbolValue sym -> sym `notElem` moduleSymbols unit
                             _ -> True
                 let externalDeps = filter isExternal fnResolvedDeps
-                traverse_ compileResolvedFunctionSymbol externalDeps
-                emit "\n"
+                unless
+                    (null externalDeps)
+                    (traverse_ compileResolvedFunctionSymbol externalDeps >> emit "\n")
                 fnDecls <- traverse compileSymbolDecl fnSymbols
-                traverse_ emit fnDecls
-                emit "\n"
+                unless
+                    (null fnDecls)
+                    (traverse_ emit fnDecls >> emit "\n")
                 traverse_ compileSymbolDef fnSymbols
             )
             initialState
@@ -127,25 +134,25 @@ compileValue value =
 
 compileApplyValue :: Value -> [Expression] -> CompileMonad String
 compileApplyValue value args =
-    case args of
-        [] -> case getType value of
-            TFunction TVoid _ _ -> return $ compileValue value ++ "()"
-            _ -> return $ compileValue value
-        _ ->
-            if length args < getArity value
+    getArity value
+        >>= \arity ->
+            if length args < arity
                 then compilePartialApply value args
                 else
-                    if length args == getArity value || isVariadic value
+                    if length args == arity || isVariadic value
                         then compileCompleteApply value args
                         else error "Function applied to too many arguments"
   where
     compileCompleteApply f exprs =
         case f of
             BuiltInValue builtIn -> builtInCompile builtIn exprs
-            _ -> do
-                compiledExprs <- traverse compileExpression args
-                let compiledValues = map compileValue compiledExprs
-                return $ compileValue f ++ "(" ++ intercalate ", " compiledValues ++ ")"
+            _ ->
+                if null args
+                    then return $ compileValue f
+                    else do
+                        compiledExprs <- traverse compileExpression (filter (/= ELiteral LVoid) args)
+                        let compiledValues = map compileValue compiledExprs
+                        return $ compileValue f ++ "(" ++ intercalate ", " compiledValues ++ ")"
     compilePartialApply f exprs = undefined
 
 getType :: Value -> Type
@@ -164,22 +171,28 @@ getType v =
         UnresolvedValue name -> error $ "Unresolved symbol: \"" ++ name ++ "\""
         NoValue -> error "No value"
 
-getArity :: Value -> Int
+getArity :: Value -> CompileMonad Int
 getArity v =
     case v of
         TemporaryValue _ t -> typeArity t
         LocalValue _ (LocalVariable t _) -> typeArity t
-        PartialValue f args -> getArity f - length args
-        BuiltInValue builtIn -> builtInArity builtIn
-        CSymbolValue (CSymbol{symbolType = CT_Function _ params _}) -> length params
-        CygnetSymbolValue (Symbol _ _ _ (Function _ t _)) -> typeArity t
-        _ -> 0
+        AnonymousValue _ t -> typeArity t
+        PartialValue f args -> (-) <$> getArity f <*> return (length args)
+        BuiltInValue builtIn -> return $ builtInArity builtIn
+        CSymbolValue (CSymbol{symbolType = CT_Function _ params _}) -> return $ length params
+        CygnetSymbolValue (Symbol _ _ _ (TLFunction t _ _)) -> typeArity t
+        CygnetSymbolValue (Symbol _ _ _ (TLConstant _ _)) -> return 0
+        _ -> return 0
   where
     typeArity t =
         case t of
-            TFunction TVoid ret _ -> typeArity ret
-            TFunction _ ret _ -> 1 + typeArity ret
-            _ -> 0
+            TFunction _ a _ -> productSize a
+            TNamed name -> resolve name >>= getArity
+            _ -> return 0
+    productSize t =
+        case t of
+            TProduct ts -> return $ length ts
+            _ -> return 1
 
 isVariadic :: Value -> Bool
 isVariadic v =
@@ -192,7 +205,6 @@ data BuiltIn = BuiltIn
     { builtInName :: String
     , builtInType :: Type
     , builtInArity :: Int
-    , builtInPartialApply :: Bool
     , builtInCompile :: [Expression] -> CompileMonad String
     }
 
@@ -233,9 +245,8 @@ builtIns =
          in ( name
             , BuiltIn
                 { builtInName = name
-                , builtInType = TFunction a (TFunction b c False) False
+                , builtInType = TFunction False a (TFunction False b c)
                 , builtInArity = 2
-                , builtInPartialApply = False
                 , builtInCompile = compileBinary
                 }
             )
@@ -259,9 +270,8 @@ builtIns =
          in ( name
             , BuiltIn
                 { builtInName = name
-                , builtInType = TFunction TBool (TFunction TBool TBool False) False
+                , builtInType = TFunction False TBool (TFunction False TBool TBool)
                 , builtInArity = 2
-                , builtInPartialApply = True
                 , builtInCompile = compileAnd
                 }
             )
@@ -285,9 +295,8 @@ builtIns =
          in ( name
             , BuiltIn
                 { builtInName = name
-                , builtInType = TFunction TBool (TFunction TBool TBool False) False
+                , builtInType = TFunction False TBool (TFunction False TBool TBool)
                 , builtInArity = 2
-                , builtInPartialApply = True
                 , builtInCompile = compileOr
                 }
             )
@@ -334,10 +343,11 @@ resolve name = do
 symbolDependencies :: Symbol -> CompileMonad (Set String)
 symbolDependencies symbol =
     case symbol of
-        Symbol _ _ _ (Function fbody ftype params) -> functionDependencies fbody ftype params
+        Symbol _ _ _ (TLFunction ftype params fbody) -> functionDependencies ftype params fbody
+        _ -> return Set.empty
 
-functionDependencies :: Block -> Type -> [String] -> CompileMonad (Set String)
-functionDependencies fbody ftype params = do
+functionDependencies :: Type -> [String] -> Block -> CompileMonad (Set String)
+functionDependencies ftype params fbody = do
     resetAnonymous
     pushLocalBlock
     let fparams = getFuncParams ftype params
@@ -588,7 +598,7 @@ convertCToCygnet ctype =
                         map convertCToCygnet $
                             if null ps then [CT_Void, r] else ps ++ [r]
              in case funcType of
-                    TFunction a b _ -> TFunction a b v
+                    TFunction _ a b -> TFunction v a b
                     _ -> funcType
         CT_Struct fs -> undefined
         CT_Union fs -> undefined
@@ -599,7 +609,7 @@ convertCToCygnet ctype =
         case curriedTypes of
             [] -> TVoid
             [t] -> t
-            (t : ts) -> TFunction t (buildFuncType ts) False
+            (t : ts) -> TFunction False t (buildFuncType ts)
 
 compileFuncProto :: Access -> Linkage -> String -> Type -> [Value] -> CompileMonad String
 compileFuncProto access linkage name ftype params =
@@ -617,7 +627,7 @@ compileFuncProto access linkage name ftype params =
                         ++ intercalate ", " funcParams
                         ++ ")"
                     )
-        _ -> compileFuncProto access linkage name (TFunction TVoid ftype False) params
+        _ -> compileFuncProto access linkage name (TFunction False TVoid ftype) params
 
 compileAccess :: Access -> String
 compileAccess access = case access of
@@ -643,7 +653,7 @@ compileTypeName t =
         TDouble -> return "double"
         TLDouble -> return "long double"
         TBool -> return "int"
-        TFunction TVoid a _ -> compileTypeName a
+        TProduct{} -> return $ "<prod type> " ++ show t
         TFunction{} -> return $ "<fn type> " ++ show t
         TNamed name -> resolve name >>= compileTypeName . getType
         TConstructor _ _ -> return $ "<type constructor> " ++ show t
@@ -651,8 +661,11 @@ compileTypeName t =
 
 compileFuncParam :: Value -> CompileMonad String
 compileFuncParam pval = do
-    typeName <- compileTypeName (getType pval)
-    return $ typeName ++ " " ++ compileValue pval
+    let ptype = getType pval
+    typeName <- compileTypeName ptype
+    if ptype == TVoid
+        then return typeName
+        else return $ typeName ++ " " ++ compileValue pval
 
 compileFuncParams :: [Value] -> CompileMonad [String]
 compileFuncParams params =
@@ -662,13 +675,16 @@ compileFuncParams params =
 
 compileSymbolDecl :: Symbol -> CompileMonad String
 compileSymbolDecl symbol = case symbol of
-    Symbol access linkage _ (Function _ ftype params) ->
+    Symbol access linkage _ (TLFunction ftype params _) ->
         compileFuncDecl access linkage (compileValue $ CygnetSymbolValue symbol) ftype params
+    Symbol _ _ name _ -> error $ "Attempting to compile declaration of non-function: " ++ name
 
 compileSymbolDef :: Symbol -> CompileMonad ()
 compileSymbolDef symbol = case symbol of
-    Symbol access linkage _ (Function fbody ftype params) ->
+    Symbol access linkage _ (TLFunction ftype params fbody) ->
         compileFuncDef access linkage (compileValue $ CygnetSymbolValue symbol) fbody ftype params
+    Symbol access linkage _ (TLConstant ctype cbody) ->
+        compileConstDef access linkage (compileValue $ CygnetSymbolValue symbol) cbody ctype
 
 compileFuncDecl :: Access -> Linkage -> String -> Type -> [String] -> CompileMonad String
 compileFuncDecl access linkage name ftype params =
@@ -677,7 +693,7 @@ compileFuncDecl access linkage name ftype params =
 compileFuncDef :: Access -> Linkage -> String -> Block -> Type -> [String] -> CompileMonad ()
 compileFuncDef access linkage name fbody ftype params = do
     let paramCount = length params
-    uncurriedParams <- beginFuncDef
+    uncurriedParams <- filter (\v -> getType v /= TVoid) <$> beginFuncDef
     let anonCount = length uncurriedParams - paramCount
     let fbody' = decurryFunction anonCount fbody
     let retType = fromJust $ getPartialType (length params) ftype
@@ -700,6 +716,18 @@ compileFuncDef access linkage name fbody ftype params = do
         popIndent
         emit "}\n\n"
         popLocalBlock
+
+compileConstDef :: Access -> Linkage -> String -> Block -> Type -> CompileMonad ()
+compileConstDef _ _ name cbody ctype =
+    do
+        typeName <- compileTypeName ctype
+        let constVal =
+                case cbody of
+                    [SExpression (ELiteral (LBool x))] -> if x then "1" else "0"
+                    [SExpression (ELiteral (LInteger x))] -> show x
+                    [SExpression (ELiteral (LFloat x))] -> show x
+                    _ -> error "Compiling non-constant as a constant"
+        emitIndented $ "const " ++ typeName ++ " " ++ name ++ " = " ++ constVal ++ ";\n"
 
 assignVar :: Value -> CompileMonad ()
 assignVar value =
@@ -938,7 +966,7 @@ getExpressionType expr =
             do
                 appTypes <- traverse getExpressionType application
                 case appTypes of
-                    (TFunction _ _ v : _) -> return $ fromJust $ getApplyType appTypes v
+                    (TFunction v _ _ : _) -> return $ fromJust $ getApplyType appTypes v
                     _ -> return $ fromJust $ getApplyType appTypes False
         ELiteral literal ->
             case literal of
@@ -967,18 +995,22 @@ unifies a b =
     case (a, b) of
         (TVar _, _) -> True
         (_, TVar _) -> True
-        (TFunction TVoid a' _, b') -> unifies a' b'
-        (a', TFunction TVoid b' _) -> unifies a' b'
-        (TFunction a1 a2 _, TFunction b1 b2 _) -> unifies a1 b1 && unifies a2 b2
+        (TFunction _ a1 a2, TFunction _ b1 b2) -> unifies a1 b1 && unifies a2 b2
+        (TProduct as, TProduct bs) -> length as == length bs && foldl' (\u (a', b') -> u && unifies a' b') True (zip as bs)
         _ -> a == b
 
 getPartialType :: Int -> Type -> Maybe Type
 getPartialType args f =
-    if args == 0
-        then Just f
-        else case f of
-            TFunction _ r _ -> getPartialType (args - 1) r
-            _ -> Nothing
+    case f of
+        TFunction _ (TProduct []) r -> getPartialType args r
+        TFunction v (TProduct [t]) r -> getPartialType args (TFunction v t r)
+        _ ->
+            if args == 0
+                then Just f
+                else case f of
+                    TFunction v (TProduct (_ : ts)) r -> getPartialType (args - 1) (TFunction v (TProduct ts) r)
+                    TFunction _ _ r -> getPartialType (args - 1) r
+                    _ -> Nothing
 
 getApplyType :: [Type] -> Variadic -> Maybe Type
 getApplyType t variadic =
@@ -987,7 +1019,13 @@ getApplyType t variadic =
         [t'] -> Just t'
         (f : x : xs) ->
             case f of
-                TFunction a b _ ->
+                TFunction _ (TProduct []) b -> getApplyType (b : xs) variadic
+                TFunction v (TProduct [t']) b -> getApplyType (TFunction v t' b : x : xs) variadic
+                TFunction v (TProduct (t' : ts)) b ->
+                    if unifies x t'
+                        then getApplyType (TFunction v (TProduct ts) b : xs) variadic
+                        else Nothing
+                TFunction _ a b ->
                     if unifies x a
                         then getApplyType (b : xs) variadic
                         else Nothing
@@ -1001,12 +1039,14 @@ getFuncParams ftype = getFuncParams' (getFuncParamTypes ftype)
   where
     getFuncParams' ptypes params =
         case (ptypes, params) of
-            (TVoid : pts, ps) -> getFuncParams' pts ps
             ([], []) -> []
             ([], _) -> error "Too many parameters to function"
             (ts, []) -> zipWith AnonymousValue getAnonymousParameterNames ts
             (ptype : pts, param : ps) -> LocalValue param (LocalVariable ptype False) : getFuncParams' pts ps
     getFuncParamTypes ft =
         case ft of
-            TFunction param ret _ -> param : getFuncParamTypes ret
+            TFunction _ param _ ->
+                case param of
+                    TProduct ts -> ts
+                    _ -> [param]
             _ -> []
