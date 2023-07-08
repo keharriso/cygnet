@@ -1,0 +1,20 @@
+int_literals : void -> void
+int_literals = do
+    let a = 100
+    let b = -100
+    let c = 4294967294
+    let d = 17179869184
+    let e = -17179869184
+    
+    let g = 0xff
+    let h = -0xff
+    let i = 0xffffffff
+    let j = 0x0fffffffffffffff
+    let k = -0x0fffffffffffffff
+    let l = 0xffffffffffffffff
+
+double_literals : void -> void
+double_literals = do
+    let a = 1.0
+    let b = -1e6
+    let c = 1e-6

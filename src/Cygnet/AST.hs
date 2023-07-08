@@ -87,7 +87,8 @@ data Literal
     = LVoid
     | LBool Bool
     | LString String
-    | LInteger Integer
+    | LDecimal Integer
+    | LHexadecimal Integer
     | LFloat Double
     deriving (Eq, Show)
 
@@ -145,7 +146,8 @@ isConst blk =
             ELiteral lit ->
                 case lit of
                     LBool _ -> True
-                    LInteger _ -> True
+                    LDecimal _ -> True
+                    LHexadecimal _ -> True
                     LFloat _ -> True
                     _ -> False
             ESizeOf _ -> True

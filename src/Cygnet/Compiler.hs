@@ -1,5 +1,6 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE TupleSections #-}
 
 module Cygnet.Compiler (CompilerOptions (..), NumericLimits (..), compile) where
 
@@ -17,6 +18,8 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
+
+import Numeric (showHex)
 
 import Ocelot
 
@@ -178,7 +181,7 @@ compileApplyValue value args =
                         compiledExprs <- traverse compileExpression (filter (/= ELiteral LVoid) args)
                         let compiledValues = map compileValue compiledExprs
                         return $ compileValue f ++ "(" ++ intercalate ", " compiledValues ++ ")"
-    compilePartialApply f exprs = undefined
+    compilePartialApply _ _ = undefined
 
 getType :: Value -> Type
 getType v =
@@ -422,6 +425,7 @@ expressionDependencies expr =
                 LocalValue _ _ -> return Set.empty
                 _ -> return $ Set.singleton name
         ETyped expr' _ -> expressionDependencies expr'
+        ESizeOf _ -> return Set.empty
 
 emit :: String -> CompileMonad ()
 emit text = modify $ \st -> st{compilerResult = Text.append (compilerResult st) (Text.pack text)}
@@ -625,9 +629,9 @@ convertCToCygnet ctype =
              in case funcType of
                     TFunction _ a b -> TFunction v a b
                     _ -> funcType
-        CT_Struct fs -> undefined
-        CT_Union fs -> undefined
-        CT_Enum fs -> undefined
+        CT_Struct _ -> undefined
+        CT_Union _ -> undefined
+        CT_Enum _ -> undefined
         CT_Named n -> TNamed n
   where
     buildFuncType curriedTypes =
@@ -749,7 +753,8 @@ compileConstDef _ _ name cbody ctype =
         constVal <-
             case cbody of
                 [SExpression (ELiteral (LBool x))] -> return (if x then "1" else "0")
-                [SExpression (ELiteral (LInteger x))] -> return (show x)
+                [SExpression (ELiteral (LDecimal x))] -> return (showDecimalLiteral ctype x)
+                [SExpression (ELiteral (LHexadecimal x))] -> return (showHexLiteral ctype x)
                 [SExpression (ELiteral (LFloat x))] -> return (show x)
                 [SExpression (ESizeOf t)] -> do
                     argTypeName <- compileTypeName t
@@ -788,7 +793,7 @@ decurryFunction anonArgs block =
             ELiteral _ -> error $ "Decurrying literal expression: " ++ show expr
             ENamed _ -> error $ "Decurrying named expression: " ++ show expr
             ETyped expr' _ -> decurryExpr aargs expr'
-            ESizeOf _ -> error $ "Decurrying sizeof expression"
+            ESizeOf _ -> error "Decurrying sizeof expression"
 
 compileBlock :: Block -> CompileMonad Value
 compileBlock blk = getLastValue <$> traverse compileStatement blk
@@ -825,7 +830,7 @@ compileLet assignments =
         let getAssignmentType (Assignment mut _ args st) =
                 do
                     pushLocalBlock
-                    quantifyTypeVars $ zip (repeat False) args
+                    quantifyTypeVars $ map (False,) args
                     t <- getStatementType st
                     popLocalBlock
                     return $ LocalVariable t mut
@@ -837,7 +842,7 @@ compileLet assignments =
         let compileAssignment (Assignment _ var args st, assignmentType@(LocalVariable at _)) =
                 do
                     pushLocalBlock
-                    quantifyTypeVars $ zip (repeat False) args
+                    quantifyTypeVars $ map (False,) args
                     valVar <- compileStatement st
                     popLocalBlock
                     case valVar of
@@ -846,7 +851,7 @@ compileLet assignments =
                             do
                                 let assignVal = LocalValue var assignmentType
                                 setLocal var assignmentType
-                                let varName = compileValue $ assignVal
+                                let varName = compileValue assignVal
                                 typeName <- compileTypeName at
                                 let varDecl = typeName ++ " " ++ varName
                                 emitIndented $ varDecl ++ " = " ++ compileValue valVar ++ ";\n"
@@ -917,6 +922,10 @@ compileExpression expr =
                     UnresolvedValue name' -> error $ "Unresolved symbol: \"" ++ name' ++ "\""
                     _ -> return resolved
         ETyped x _ -> compileExpression x
+        ESizeOf t ->
+            do
+                typeName <- compileTypeName t
+                compileAtomicLiteral "size_t" (TNamed "size_t") ("sizeof(" ++ typeName ++ ")")
 
 compileApply :: [Expression] -> CompileMonad Value
 compileApply exprs = do
@@ -943,7 +952,16 @@ compileLiteral literal =
                 var <- genVar (TPtr TByte)
                 emitIndented $ "const char* " ++ compileValue var ++ " = " ++ s' ++ ";\n"
                 return var
-        LInteger i -> compileAtomicLiteral "int" TInt (show i)
+        LDecimal i ->
+            do
+                intType <- getLiteralDecimalType i
+                typeName <- compileTypeName intType
+                compileAtomicLiteral typeName intType (showDecimalLiteral intType i)
+        LHexadecimal i ->
+            do
+                intType <- getLiteralHexType i
+                typeName <- compileTypeName intType
+                compileAtomicLiteral typeName intType (showHexLiteral intType i)
         LFloat f -> compileAtomicLiteral "double" TDouble (show f)
 
 compileAtomicLiteral :: String -> Type -> String -> CompileMonad Value
@@ -1002,7 +1020,8 @@ getExpressionType expr =
                 LVoid -> return TVoid
                 LBool _ -> return TBool
                 LString _ -> return (TPtr TByte)
-                LInteger _ -> return TInt
+                LDecimal x -> getLiteralDecimalType x
+                LHexadecimal x -> getLiteralHexType x
                 LFloat _ -> return TDouble
         ENamed name ->
             do
@@ -1017,8 +1036,53 @@ getExpressionType expr =
         ETyped _ t -> return t
         ESizeOf _ -> getExpressionType (ENamed "size_t")
 
+getLiteralDecimalType :: Integer -> CompileMonad Type
+getLiteralDecimalType x =
+    do
+        limits <- gets (numericLimits . compilerOptions)
+        if x >= intMin limits && x <= intMax limits then return TInt
+        else if x >= longMin limits && x <= longMax limits then return TLong
+        else if x >= llongMin limits && x <= llongMax limits then return TLLong
+        else error $ "Invalid decimal literal value: " ++ showDecimalLiteral TInt x
+
+getLiteralHexType :: Integer -> CompileMonad Type
+getLiteralHexType x =
+    do
+        limits <- gets (numericLimits . compilerOptions)
+        if x >= intMin limits && x <= intMax limits then return TInt
+        else if x >= 0 && x <= uintMax limits then return TUInt
+        else if x >= longMin limits && x <= longMax limits then return TLong
+        else if x >= 0 && x <= ulongMax limits then return TULong
+        else if x >= llongMin limits && x <= llongMax limits then return TLLong
+        else if x >= 0 && x <= ullongMax limits then return TULLong
+        else error $ "Invalid hexadecimal literal value: " ++ showHexLiteral TInt x
+
+showDecimalLiteral :: Type -> Integer -> String
+showDecimalLiteral t x = show x ++ showIntLiteralSuffix t
+
+showHexLiteral :: Type -> Integer -> String
+showHexLiteral t x =
+    if x < 0
+        then "-" ++ showHexLiteral t (-x)
+        else "0x" ++ showHex x (showIntLiteralSuffix t)
+
+showIntLiteralSuffix :: Type -> String
+showIntLiteralSuffix t =
+    case t of
+        TByte -> ""
+        TUByte -> ""
+        TShort -> ""
+        TUShort -> ""
+        TInt -> ""
+        TUInt -> "u"
+        TLong -> "l"
+        TULong -> "ul"
+        TLLong -> "ll"
+        TULLong -> "ull"
+        _ -> error $ "Invalid integer literal type: " ++ show t
+
 unify :: Type -> Type -> Type
-unify a b = a
+unify a _ = a
 
 unifies :: Type -> Type -> Bool
 unifies a b =

@@ -309,19 +309,19 @@ quotedChar = noneOf "\\\"" <|> escapeSequence
     hexChar = (\hex -> chr $ read $ "0x" ++ hex) <$> (char 'x' >> count 2 hexDigit)
 
 numberLiteral :: CygnetParser Expression
-numberLiteral = hexLiteral <|> try integerLiteral <|> floatLiteral <?> "number"
+numberLiteral = try hexLiteral <|> try integerLiteral <|> try floatLiteral <?> "number"
   where
     sign = (string "+" $> "") <|> string "-"
     hexLiteral =
         do
             sgn <- option "" $ try $ sign <* lookAhead digit
             digits <- token $ try (string "0x") *> many1 hexDigit
-            return $ ELiteral . LInteger . read $ sgn ++ "0x" ++ digits
+            return $ ELiteral . LHexadecimal . read $ sgn ++ "0x" ++ digits
     integerLiteral =
         do
             sgn <- option "" $ try $ sign <* lookAhead digit
             digits <- token $ many1 digit
-            return $ ELiteral . LInteger . read $ sgn ++ digits
+            return $ ELiteral . LDecimal . read $ sgn ++ digits
     floatLiteral =
         do
             sgn <- option "" $ try $ sign <* lookAhead digit
