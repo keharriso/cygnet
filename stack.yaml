@@ -37,7 +37,7 @@ packages:
 #
 extra-deps:
 - github: keharriso/ocelot-hs
-  commit: c98af1163f0e9830279ea1d6440f261ad937cca7
+  commit: 6beb2a88998df5bb7386911b7c3237484f85f6c7
 #
 # extra-deps: []
 

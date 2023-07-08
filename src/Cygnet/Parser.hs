@@ -41,7 +41,7 @@ header = do
     void $ updateUserState (\state -> state{moduleIncludes = includes})
 
 include :: CygnetParser String
-include = topLevel >> withPos (string "include" *> spaces *> same *> token stringLiteral <* next)
+include = topLevel >> withPos (parseKeyword "include" *> spaces *> same *> token stringLiteral <* next)
 
 definitions :: CygnetParser ()
 definitions = do
@@ -244,13 +244,14 @@ parseBody name =
     parseExpression3 = chainl1 parseExpression4 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator3 <* next))
     parseExpression4 = chainl1 parseExpression5 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator4 <* next))
     parseExpression5 = chainl1 parseExpression6 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator5 <* next))
-    parseExpression6 = (parseLiteral <|> parseApply) <* next
+    parseExpression6 = (parseLiteral <|> parseSizeOf <|> parseApply) <* next
 
     parseOperator = ENamed <$> token (many operatorChar)
 
     parseLiteral = (voidLiteral <|> boolLiteral <|> (ELiteral . LString <$> stringLiteral) <|> numberLiteral) <* next
     parseApply = EApply <$> withPos (endBy1 parseArg next)
     parseArg = sameOrIndented >> (parseLiteral <|> parseNamed <|> parseParenExpr)
+    parseSizeOf = ESizeOf <$> (parseKeyword "sizeof" *> next *> parseType)
     parseNamed = notFollowedBy parseAnyKeyword >> (ENamed <$> token parseSymbolName <* next)
     parseParenExpr = char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
     parseAnyKeyword =
@@ -268,6 +269,7 @@ parseBody name =
                 , "let"
                 , "mut"
                 , "ptr"
+                , "sizeof"
                 ]
                     ++ map fst atomicTypes
          in choice (map parseKeyword kws) <?> "keyword"

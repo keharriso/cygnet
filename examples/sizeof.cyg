@@ -1,0 +1,14 @@
+byte_size : size_t
+byte_size = sizeof byte
+
+short_size : size_t
+short_size = sizeof short
+
+int_size : size_t
+int_size = sizeof int
+
+long_size : size_t
+long_size = sizeof long
+
+llong_size : size_t
+llong_size = sizeof llong

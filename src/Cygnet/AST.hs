@@ -80,6 +80,7 @@ data Expression
     | ELiteral Literal
     | ENamed String
     | ETyped Expression Type
+    | ESizeOf Type
     deriving (Eq, Show)
 
 data Literal
@@ -147,4 +148,5 @@ isConst blk =
                     LInteger _ -> True
                     LFloat _ -> True
                     _ -> False
+            ESizeOf _ -> True
             _ -> False

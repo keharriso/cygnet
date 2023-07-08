@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE InstanceSigs #-}
 
-module Cygnet.Compiler (CompilerOptions (..), compile) where
+module Cygnet.Compiler (CompilerOptions (..), NumericLimits (..), compile) where
 
 import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
@@ -22,9 +22,33 @@ import Ocelot
 
 import Cygnet.AST
 
+data NumericLimits = NumericLimits
+    { charBit :: Integer
+    , scharMin :: Integer
+    , scharMax :: Integer
+    , ucharMax :: Integer
+    , charMin :: Integer
+    , charMax :: Integer
+    , mbLenMax :: Integer
+    , shrtMin :: Integer
+    , shrtMax :: Integer
+    , ushrtMax :: Integer
+    , intMin :: Integer
+    , intMax :: Integer
+    , uintMax :: Integer
+    , longMin :: Integer
+    , longMax :: Integer
+    , ulongMax :: Integer
+    , llongMin :: Integer
+    , llongMax :: Integer
+    , ullongMax :: Integer
+    }
+    deriving (Show)
+
 data CompilerOptions = CompilerOptions
     { includeDirs :: [FilePath]
     , verbose :: Bool
+    , numericLimits :: NumericLimits
     }
     deriving (Show)
 
@@ -66,6 +90,7 @@ compile opts unit = do
     ((), st) <-
         runStateT
             ( do
+                parseCHeader "stddef.h"
                 traverse_ parseCHeader (moduleIncludes unit)
                 let symbols = Map.elems $ moduleSymbols unit
                 let constSymbols = filter symbolIsConstant symbols
@@ -536,7 +561,7 @@ compileCType ctype =
                 baseType <- compileCType base
                 return $ baseType ++ concat (replicate indir "*")
         CT_Array base size -> compileCType base <&> (++ "[" ++ show size ++ "]")
-        CT_Char -> return "char"
+        CT_SChar -> return "signed char"
         CT_UChar -> return "unsigned char"
         CT_Short -> return "short"
         CT_UShort -> return "unsigned short"
@@ -578,7 +603,7 @@ convertCToCygnet ctype =
                         else TPtr (buildPtrType (n' - 1))
              in buildPtrType n
         CT_Array t _ -> convertCToCygnet (CT_Pointer t 1)
-        CT_Char -> TByte
+        CT_SChar -> TByte
         CT_UChar -> TUByte
         CT_Short -> TShort
         CT_UShort -> TUShort
@@ -639,7 +664,7 @@ compileTypeName t =
     case t of
         TVoid -> return "void"
         TPtr b -> (++ "*") <$> compileTypeName b
-        TByte -> return "char"
+        TByte -> return "signed char"
         TUByte -> return "unsigned char"
         TShort -> return "short"
         TUShort -> return "unsigned short"
@@ -721,12 +746,15 @@ compileConstDef :: Access -> Linkage -> String -> Block -> Type -> CompileMonad 
 compileConstDef _ _ name cbody ctype =
     do
         typeName <- compileTypeName ctype
-        let constVal =
-                case cbody of
-                    [SExpression (ELiteral (LBool x))] -> if x then "1" else "0"
-                    [SExpression (ELiteral (LInteger x))] -> show x
-                    [SExpression (ELiteral (LFloat x))] -> show x
-                    _ -> error "Compiling non-constant as a constant"
+        constVal <-
+            case cbody of
+                [SExpression (ELiteral (LBool x))] -> return (if x then "1" else "0")
+                [SExpression (ELiteral (LInteger x))] -> return (show x)
+                [SExpression (ELiteral (LFloat x))] -> return (show x)
+                [SExpression (ESizeOf t)] -> do
+                    argTypeName <- compileTypeName t
+                    return ("sizeof(" ++ argTypeName ++ ")")
+                _ -> error "Compiling non-constant as a constant"
         emitIndented $ "const " ++ typeName ++ " " ++ name ++ " = " ++ constVal ++ ";\n"
 
 assignVar :: Value -> CompileMonad ()
@@ -760,6 +788,7 @@ decurryFunction anonArgs block =
             ELiteral _ -> error $ "Decurrying literal expression: " ++ show expr
             ENamed _ -> error $ "Decurrying named expression: " ++ show expr
             ETyped expr' _ -> decurryExpr aargs expr'
+            ESizeOf _ -> error $ "Decurrying sizeof expression"
 
 compileBlock :: Block -> CompileMonad Value
 compileBlock blk = getLastValue <$> traverse compileStatement blk
@@ -986,6 +1015,7 @@ getExpressionType expr =
                     CygnetSymbolValue sym -> return $ symbolGetType sym
                     _ -> error $ "Failed to resolve name \"" ++ name ++ "\""
         ETyped _ t -> return t
+        ESizeOf _ -> getExpressionType (ENamed "size_t")
 
 unify :: Type -> Type -> Type
 unify a b = a

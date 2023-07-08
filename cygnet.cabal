@@ -25,6 +25,7 @@ source-repository head
 library
   exposed-modules:
       Cygnet.AST
+      Cygnet.CC
       Cygnet.Compiler
       Cygnet.Parser
   other-modules:
