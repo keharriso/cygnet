@@ -244,7 +244,15 @@ parseBody name =
     parseExpression3 = chainl1 parseExpression4 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator3 <* next))
     parseExpression4 = chainl1 parseExpression5 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator4 <* next))
     parseExpression5 = chainl1 parseExpression6 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator5 <* next))
-    parseExpression6 = (parseLiteral <|> parseSizeOf <|> parseApply) <* next
+    parseExpression6 = do
+        expr <- parseLiteral <|> parseSizeOf <|> parseApply
+        next
+        asType <- parseAs
+        case asType of
+            Just t -> return $ ETyped expr t
+            Nothing -> return expr
+
+    parseAs = optionMaybe (parseKeyword "as" *> next *> parseType <* next)
 
     parseOperator = ENamed <$> token (many operatorChar)
 

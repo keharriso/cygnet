@@ -921,6 +921,14 @@ compileExpression expr =
                     AmbiguousValue name' _ -> error $ "Ambiguous symbol: \"" ++ name' ++ "\""
                     UnresolvedValue name' -> error $ "Unresolved symbol: \"" ++ name' ++ "\""
                     _ -> return resolved
+        ETyped (ELiteral (LDecimal n)) t ->
+            do
+                typeName <- compileTypeName t
+                compileAtomicLiteral typeName t (showDecimalLiteral t n)
+        ETyped (ELiteral (LHexadecimal n)) t ->
+            do
+                typeName <- compileTypeName t
+                compileAtomicLiteral typeName t (showHexLiteral t n)
         ETyped x _ -> compileExpression x
         ESizeOf t ->
             do

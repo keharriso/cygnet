@@ -5,13 +5,14 @@ int_literals = do
     let c = 4294967294
     let d = 17179869184
     let e = -17179869184
-    
+    let f = 18446744073709551614 as ullong
     let g = 0xff
     let h = -0xff
     let i = 0xffffffff
     let j = 0x0fffffffffffffff
     let k = -0x0fffffffffffffff
     let l = 0xffffffffffffffff
+    let m = 0x10 as ubyte
 
 double_literals : void -> void
 double_literals = do
