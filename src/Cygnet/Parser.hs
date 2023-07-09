@@ -245,8 +245,7 @@ parseBody name =
     parseExpression4 = chainl1 parseExpression5 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator4 <* next))
     parseExpression5 = chainl1 parseExpression6 ((\f x y -> EApply [f, x, y]) <$> (ENamed <$> token parseOperator5 <* next))
     parseExpression6 = do
-        expr <- parseLiteral <|> parseSizeOf <|> parseApply
-        next
+        expr <- (parseLiteral <|> parseSizeOf <|> parseApply) <* next
         asType <- parseAs
         case asType of
             Just t -> return $ ETyped expr t
@@ -261,7 +260,13 @@ parseBody name =
     parseArg = sameOrIndented >> (parseLiteral <|> parseNamed <|> parseParenExpr)
     parseSizeOf = ESizeOf <$> (parseKeyword "sizeof" *> next *> parseType)
     parseNamed = notFollowedBy parseAnyKeyword >> (ENamed <$> token parseSymbolName <* next)
-    parseParenExpr = char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
+    parseParenExpr = do
+        expr <- char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
+        asType <- parseAs
+        case asType of
+            Just t -> return $ ETyped expr t
+            Nothing -> return expr
+
     parseAnyKeyword =
         let kws =
                 [ "module"

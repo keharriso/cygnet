@@ -12,7 +12,7 @@ int_literals = do
     let j = 0x0fffffffffffffff
     let k = -0x0fffffffffffffff
     let l = 0xffffffffffffffff
-    let m = 0x10 as ubyte
+    let m = (0x1000 as uint) as ubyte
 
 double_literals : void -> void
 double_literals = do

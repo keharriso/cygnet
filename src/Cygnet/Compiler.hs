@@ -929,7 +929,13 @@ compileExpression expr =
             do
                 typeName <- compileTypeName t
                 compileAtomicLiteral typeName t (showHexLiteral t n)
-        ETyped x _ -> compileExpression x
+        ETyped x t ->
+            do
+                val <- compileExpression x
+                var <- genVar t
+                typeName <- compileTypeName t
+                emitIndented $ typeName ++ " " ++ compileValue var ++ " = (" ++ typeName ++ ")" ++ compileValue val ++ ";\n"
+                return var
         ESizeOf t ->
             do
                 typeName <- compileTypeName t
@@ -1048,22 +1054,38 @@ getLiteralDecimalType :: Integer -> CompileMonad Type
 getLiteralDecimalType x =
     do
         limits <- gets (numericLimits . compilerOptions)
-        if x >= intMin limits && x <= intMax limits then return TInt
-        else if x >= longMin limits && x <= longMax limits then return TLong
-        else if x >= llongMin limits && x <= llongMax limits then return TLLong
-        else error $ "Invalid decimal literal value: " ++ showDecimalLiteral TInt x
+        if x >= intMin limits && x <= intMax limits
+            then return TInt
+            else
+                if x >= longMin limits && x <= longMax limits
+                    then return TLong
+                    else
+                        if x >= llongMin limits && x <= llongMax limits
+                            then return TLLong
+                            else error $ "Invalid decimal literal value: " ++ showDecimalLiteral TInt x
 
 getLiteralHexType :: Integer -> CompileMonad Type
 getLiteralHexType x =
     do
         limits <- gets (numericLimits . compilerOptions)
-        if x >= intMin limits && x <= intMax limits then return TInt
-        else if x >= 0 && x <= uintMax limits then return TUInt
-        else if x >= longMin limits && x <= longMax limits then return TLong
-        else if x >= 0 && x <= ulongMax limits then return TULong
-        else if x >= llongMin limits && x <= llongMax limits then return TLLong
-        else if x >= 0 && x <= ullongMax limits then return TULLong
-        else error $ "Invalid hexadecimal literal value: " ++ showHexLiteral TInt x
+        if x >= intMin limits && x <= intMax limits
+            then return TInt
+            else
+                if x >= 0 && x <= uintMax limits
+                    then return TUInt
+                    else
+                        if x >= longMin limits && x <= longMax limits
+                            then return TLong
+                            else
+                                if x >= 0 && x <= ulongMax limits
+                                    then return TULong
+                                    else
+                                        if x >= llongMin limits && x <= llongMax limits
+                                            then return TLLong
+                                            else
+                                                if x >= 0 && x <= ullongMax limits
+                                                    then return TULLong
+                                                    else error $ "Invalid hexadecimal literal value: " ++ showHexLiteral TInt x
 
 showDecimalLiteral :: Type -> Integer -> String
 showDecimalLiteral t x = show x ++ showIntLiteralSuffix t
