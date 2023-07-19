@@ -8,6 +8,7 @@ import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.State (StateT, get, gets, modify, runStateT)
 
+import Data.Char (ord)
 import Data.Foldable (foldl', traverse_)
 import Data.Functor ((<&>))
 import Data.List (intercalate, nub, sortOn)
@@ -135,7 +136,17 @@ data Value
     deriving (Eq, Show)
 
 mangleName :: String -> String
-mangleName = id
+mangleName = concatMap mangleChar
+  where
+    isValidCSymbolChar c =
+        c `elem` "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+    mangleChar c
+        | c == '_' = "__"
+        | isValidCSymbolChar c = [c]
+        | otherwise = "_" ++ padL '0' 2 (showHex (ord c) "")
+    padL p s l
+        | length l >= s = l
+        | otherwise = replicate (s - length l) p ++ l
 
 getCygnetTopLevelName :: String -> String
 getCygnetTopLevelName name = "cyg_tl_" ++ mangleName name
@@ -424,6 +435,11 @@ expressionDependencies expr =
             case resolved of
                 LocalValue _ _ -> return Set.empty
                 _ -> return $ Set.singleton name
+        EDeref expr' -> expressionDependencies expr'
+        EDotted exprs ->
+            case exprs of
+                [] -> return Set.empty
+                e : _ -> expressionDependencies e
         ETyped expr' _ -> expressionDependencies expr'
         ESizeOf _ -> return Set.empty
 
@@ -714,6 +730,8 @@ compileSymbolDef symbol = case symbol of
         compileFuncDef access linkage (compileValue $ CygnetSymbolValue symbol) fbody ftype params
     Symbol access linkage _ (TLConstant ctype cbody) ->
         compileConstDef access linkage (compileValue $ CygnetSymbolValue symbol) cbody ctype
+    Symbol _ _ _ (TLEnum _) ->
+        compileEnum symbol
 
 compileFuncDecl :: Access -> Linkage -> String -> Type -> [String] -> CompileMonad String
 compileFuncDecl access linkage name ftype params =
@@ -762,6 +780,29 @@ compileConstDef _ _ name cbody ctype =
                 _ -> error "Compiling non-constant as a constant"
         emitIndented $ "const " ++ typeName ++ " " ++ name ++ " = " ++ constVal ++ ";\n"
 
+compileEnum :: Symbol -> CompileMonad ()
+compileEnum symbol@(Symbol _ linkage name (TLEnum values)) =
+    do
+        emit $ "enum " ++ compileValue (CygnetSymbolValue symbol) ++ "\n"
+        emit "{\n"
+        pushIndent
+        traverse_ compileEnumValue values
+        popIndent
+        emit "};\n"
+  where
+    compileEnumValue (element, expr) =
+        do
+            let elemName =
+                    if linkage == C
+                        then element
+                        else getCygnetTopLevelName $ name ++ "." ++ element
+            emitIndented elemName
+            case expr of
+                Just (ELiteral (LDecimal i)) -> emit $ " = " ++ showDecimalLiteral TInt i ++ ",\n"
+                Just (ELiteral (LHexadecimal i)) -> emit $ " = " ++ showHexLiteral TInt i ++ ",\n"
+                _ -> emit ",\n"
+compileEnum _ = error "Compiling non-enum as an enum"
+
 assignVar :: Value -> CompileMonad ()
 assignVar value =
     case value of
@@ -792,6 +833,8 @@ decurryFunction anonArgs block =
             EApply exprs -> EApply $ exprs ++ map ENamed (take aargs getAnonymousParameterNames)
             ELiteral _ -> error $ "Decurrying literal expression: " ++ show expr
             ENamed _ -> error $ "Decurrying named expression: " ++ show expr
+            EDeref _ -> error $ "Decurrying deref expression: " ++ show expr
+            EDotted _ -> error $ "Decurrying dotted expression: " ++ show expr
             ETyped expr' _ -> decurryExpr aargs expr'
             ESizeOf _ -> error "Decurrying sizeof expression"
 

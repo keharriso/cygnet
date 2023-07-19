@@ -13,6 +13,7 @@ module Cygnet.AST (
     Kind (..),
     Mutable,
     Variadic,
+    EnumElement,
     symbolIsFunction,
     symbolIsConstant,
     symbolGetType,
@@ -44,9 +45,12 @@ data Linkage
 data TopLevel
     = TLFunction Type [ParameterName] Block
     | TLConstant Type Block
+    | TLEnum [(EnumElement, Maybe Expression)]
     deriving (Eq, Show)
 
 type ParameterName = String
+
+type EnumElement = String
 
 symbolIsFunction :: Symbol -> Bool
 symbolIsFunction (Symbol _ _ _ tl) =
@@ -58,6 +62,7 @@ symbolIsConstant :: Symbol -> Bool
 symbolIsConstant (Symbol _ _ _ tl) =
     case tl of
         TLConstant{} -> True
+        TLEnum{} -> True
         _ -> False
 
 type Block = [Statement]
@@ -79,6 +84,9 @@ data Expression
     = EApply [Expression]
     | ELiteral Literal
     | ENamed String
+    | ERef Expression
+    | EDeref Expression
+    | EDotted [Expression]
     | ETyped Expression Type
     | ESizeOf Type
     deriving (Eq, Show)
@@ -129,6 +137,7 @@ symbolGetType (Symbol _ _ _ tl) =
     case tl of
         TLFunction t _ _ -> t
         TLConstant t _ -> t
+        TLEnum _ -> TInt
 
 isConst :: Block -> Bool
 isConst blk =

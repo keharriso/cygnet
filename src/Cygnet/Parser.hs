@@ -2,7 +2,7 @@
 
 module Cygnet.Parser (parseCygnet) where
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 
 import Data.Char (chr)
 import Data.Functor (($>))
@@ -57,26 +57,56 @@ parseTopLevel =
                 next
                 linkage <- parseLinkage
                 next
-                name <- parseSymbolName
-                if linkage == C && not (isValidCName name)
-                    then error $ "Invalid foreign function name: \"" ++ name ++ "\""
-                    else do
-                        same
-                        next
-                        sameOrIndented
-                        void $ char ':'
-                        next
-                        fnType <- parseType
-                        next
-                        (fnParams, fnBody) <- parseBody name
-                        let tl =
-                                if not (isConst fnBody)
-                                    then case fnType of
-                                        TFunction{} -> TLFunction fnType fnParams fnBody
-                                        _ -> error $ "Function body doesn't have function type: \"" ++ name ++ "\""
-                                    else TLConstant fnType fnBody
-                        return $ Symbol access linkage name tl
+                same
+                parseEnum access linkage
+                    <|> parseFunction access linkage
             )
+  where
+    parseEnum access linkage = do
+        next
+        parseKeyword "enum"
+        next
+        name <- parseSymbolName
+        same
+        when (linkage == C && not (isValidCName name)) $
+            error $
+                "Invalid foreign enum name: \"" ++ name ++ "\""
+        next
+        sameOrIndented
+        void $ token (char '=')
+        next
+        enumElems <- sepBy1 (parseEnumElement linkage) (try (next >> sameOrIndented >> token (char '|') >> next))
+        return $ Symbol access linkage name $ TLEnum enumElems
+    parseEnumElement linkage = do
+        sameOrIndented
+        name <- parseSymbolName
+        when (linkage == C && not (isValidCName name)) $
+            error $
+                "Invalid foreign enum element: \"" ++ name ++ "\""
+        sameOrIndented
+        expr <- optionMaybe (try (next >> token (char '=') >> next >> sameOrIndented >> integerLiteral))
+        return (name, expr)
+    parseFunction access linkage = do
+        next
+        name <- parseSymbolName
+        when (linkage == C && not (isValidCName name)) $
+            error $
+                "Invalid foreign symbol name: \"" ++ name ++ "\""
+        same
+        next
+        sameOrIndented
+        void $ char ':'
+        next
+        fnType <- parseType
+        next
+        (fnParams, fnBody) <- parseBody name
+        let tl =
+                if not (isConst fnBody)
+                    then case fnType of
+                        TFunction{} -> TLFunction fnType fnParams fnBody
+                        _ -> error $ "Function body doesn't have function type: \"" ++ name ++ "\""
+                    else TLConstant fnType fnBody
+        return $ Symbol access linkage name tl
 
 isValidCName :: String -> Bool
 isValidCName name =
@@ -105,7 +135,7 @@ parseOperator0 :: CygnetParser String
 parseOperator0 = token $ (:) <$> oneOf "|" <*> many operatorChar
 
 parseOperator1 :: CygnetParser String
-parseOperator1 = token $ (:) <$> oneOf "&" <*> many operatorChar
+parseOperator1 = try (token $ (:) <$> oneOf "&" <*> many operatorChar)
 
 parseOperator2 :: CygnetParser String
 parseOperator2 =
@@ -255,17 +285,41 @@ parseBody name =
 
     parseOperator = ENamed <$> token (many operatorChar)
 
+    refChar = char '&'
+    derefChar = char '@'
+
     parseLiteral = (voidLiteral <|> boolLiteral <|> (ELiteral . LString <$> stringLiteral) <|> numberLiteral) <* next
     parseApply = EApply <$> withPos (endBy1 parseArg next)
-    parseArg = sameOrIndented >> (parseLiteral <|> parseNamed <|> parseParenExpr)
+    parseArg = sameOrIndented >> (parseLiteral <|> parseDotted <|> parseParenExpr)
     parseSizeOf = ESizeOf <$> (parseKeyword "sizeof" *> next *> parseType)
-    parseNamed = notFollowedBy parseAnyKeyword >> (ENamed <$> token parseSymbolName <* next)
+    parseDotted = EDotted <$> (sepBy1 parseDottedPart (char '.') <* next)
+    parseDottedPart = do
+        ref <- optionMaybe refChar
+        case ref of
+            Nothing ->
+                do
+                    deref <- optionMaybe derefChar
+                    case deref of
+                        Nothing -> parseNamed <|> parseParenExpr
+                        _ -> EDeref <$> parseDottedPart
+            _ -> ERef <$> parseDottedPart
+    parseNamed = notFollowedBy parseAnyKeyword >> (ENamed <$> token parseSymbolName)
     parseParenExpr = do
-        expr <- char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
-        asType <- parseAs
-        case asType of
-            Just t -> return $ ETyped expr t
-            Nothing -> return expr
+        ref <- optionMaybe refChar
+        case ref of
+            Nothing ->
+                do
+                    deref <- optionMaybe derefChar
+                    case deref of
+                        Nothing ->
+                            do
+                                expr <- char '(' >> next >> (parseOperator <|> parseExpression) <* next <* char ')' <* next
+                                asType <- parseAs
+                                case asType of
+                                    Just t -> return $ ETyped expr t
+                                    Nothing -> return expr
+                        _ -> EDeref <$> parseParenExpr
+            _ -> ERef <$> parseParenExpr
 
     parseAnyKeyword =
         let kws =
@@ -282,7 +336,10 @@ parseBody name =
                 , "let"
                 , "mut"
                 , "ptr"
+                , "ref"
                 , "sizeof"
+                , "as"
+                , "enum"
                 ]
                     ++ map fst atomicTypes
          in choice (map parseKeyword kws) <?> "keyword"
@@ -321,8 +378,8 @@ quotedChar = noneOf "\\\"" <|> escapeSequence
             <|> char '0' $> '\0'
     hexChar = (\hex -> chr $ read $ "0x" ++ hex) <$> (char 'x' >> count 2 hexDigit)
 
-numberLiteral :: CygnetParser Expression
-numberLiteral = try hexLiteral <|> try integerLiteral <|> try floatLiteral <?> "number"
+integerLiteral :: CygnetParser Expression
+integerLiteral = try hexLiteral <|> try decimalLiteral <?> "integer"
   where
     sign = (string "+" $> "") <|> string "-"
     hexLiteral =
@@ -330,11 +387,16 @@ numberLiteral = try hexLiteral <|> try integerLiteral <|> try floatLiteral <?> "
             sgn <- option "" $ try $ sign <* lookAhead digit
             digits <- token $ try (string "0x") *> many1 hexDigit
             return $ ELiteral . LHexadecimal . read $ sgn ++ "0x" ++ digits
-    integerLiteral =
+    decimalLiteral =
         do
             sgn <- option "" $ try $ sign <* lookAhead digit
             digits <- token $ many1 digit
             return $ ELiteral . LDecimal . read $ sgn ++ digits
+
+numberLiteral :: CygnetParser Expression
+numberLiteral = integerLiteral <|> try floatLiteral <?> "number"
+  where
+    sign = (string "+" $> "") <|> string "-"
     floatLiteral =
         do
             sgn <- option "" $ try $ sign <* lookAhead digit
@@ -356,4 +418,4 @@ next :: CygnetParser ()
 next = void $ many $ void space <|> void (commentBegin >> manyTill anyChar endl)
 
 token :: CygnetParser a -> CygnetParser a
-token p = p <* lookAhead (void space <|> void (oneOf "()") <|> commentBegin <|> eof)
+token p = p <* lookAhead (void space <|> void (oneOf "().") <|> commentBegin <|> eof)
